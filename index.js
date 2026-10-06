@@ -1,5 +1,4 @@
 const { Telegraf, Markup } = require('telegraf');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -10,7 +9,6 @@ const path = require('path');
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const ADMIN_ID = 8017590244;
 const VAULT_CHANNEL_ID = -1004295952149; // ערוץ האחסון מאחורי הקלעים
-const TARGET_GROUP_ID = process.env.TARGET_GROUP_ID; // קבוצת הפעילות (אופציונלי לבדיקה)
 const SIGNATURE_LINK = 'https://t.me/movie_time_by';
 const ADMIN_CONTACT_LINK = 'https://t.me/admi_nos';
 
@@ -24,37 +22,11 @@ if (!BOT_TOKEN) {
 // -------------------------------------------------------------
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('🍿 Movie Master Bot is Running!'));
+app.get('/', (req, res) => res.send('🍿 Movie Fast Bot is Running!'));
 app.listen(PORT, () => console.log(`[HTTP] Server listening on port ${PORT}`));
 
 // -------------------------------------------------------------
-// 3. אתחול מנוע Gemini AI עם תמיכה במיועד מרובה מפתחות (Failover)
-// -------------------------------------------------------------
-const rawAiKeys = process.env.GEMINI_API_KEYS || process.env.GEMINI_API_KEY || '';
-const aiKeys = rawAiKeys.split(',').map(k => k.trim()).filter(Boolean);
-let currentKeyIndex = 0;
-
-async function generateAIResponse(prompt) {
-  if (aiKeys.length === 0) return null;
-
-  for (let i = 0; i < aiKeys.length; i++) {
-    const keyIdx = (currentKeyIndex + i) % aiKeys.length;
-    try {
-      const genAI = new GoogleGenerativeAI(aiKeys[keyIdx]);
-      const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
-      const result = await model.generateContent(prompt);
-      const response = await result.response;
-      currentKeyIndex = keyIdx; // שמירת המפתח העובד
-      return response.text();
-    } catch (err) {
-      console.warn(`[AI Warning] Key index ${keyIdx} failed:`, err.message);
-    }
-  }
-  return null;
-}
-
-// -------------------------------------------------------------
-// 4. ניהול מאגר הנתונים (JSON Persistence)
+// 3. ניהול מאגר הנתונים (JSON Persistence)
 // -------------------------------------------------------------
 const DB_PATH = path.join(__dirname, 'movies_db.json');
 let db = { movies: [], channels: [] };
@@ -84,17 +56,10 @@ function saveDB() {
 loadDB();
 
 // -------------------------------------------------------------
-// 5. ניהול סשנים בזיכרון & מעקב כישלונות
+// 4. ניהול סשנים בזיכרון & מעקב כישלונות
 // -------------------------------------------------------------
-const adminSessions = {}; // { [adminId]: { step, tempMedia: [], tempSeriesTitle, ... } }
+const adminSessions = {}; // { [adminId]: { step, tempMedia: [], ... } }
 const failedSearchAttempts = {}; // { [userId]: count }
-
-const sleep = (ms) => new Promise(res => setTimeout(res, ms));
-
-// -------------------------------------------------------------
-// 6. אתחול הבוט
-// -------------------------------------------------------------
-const bot = new Telegraf(BOT_TOKEN);
 
 // שליחת גיבוי אוטומטי למנהל
 async function sendBackupToAdmin(ctx) {
@@ -122,20 +87,24 @@ function getAdminKeyboard() {
 }
 
 // -------------------------------------------------------------
-// 7. מוח חלק 1: פאנל ניהול (מנהל בלבד ID: 8017590244)
+// 5. אתחול הבוט
+// -------------------------------------------------------------
+const bot = new Telegraf(BOT_TOKEN);
+
+// -------------------------------------------------------------
+// 6. פאנל ניהול (מנהל בלבד ID: 8017590244)
 // -------------------------------------------------------------
 
-// פקודת התחלה
 bot.start(async (ctx) => {
   if (ctx.from.id === ADMIN_ID && ctx.chat.type === 'private') {
     adminSessions[ADMIN_ID] = { step: 'IDLE' };
-    return ctx.reply('👋 **שלום מנהל!** ברוך הבא לפאנל השליטה החכם.', {
+    return ctx.reply('👋 **שלום מנהל!** ברוך הבא לפאנל השליטה.', {
       parse_mode: 'Markdown',
       ...getAdminKeyboard()
     });
   }
   
-  await ctx.reply('👋 **ברוכים הבאים לבוט הסרטים והסדרות!**\nחפשו קובץ או סדרה ישירות בקבוצה.', {
+  await ctx.reply('👋 **ברוכים הבאים לבוט הסרטים והסדרות!**\nחפשו שם סרט או סדרה בלבד בקבוצה.', {
     parse_mode: 'Markdown'
   });
 });
@@ -173,10 +142,9 @@ bot.hears('📊 מצב מאגר', async (ctx) => {
 });
 
 // -------------------------------------------------------------
-// 8. טיפול בהודעות פרטיות / תהליכי ניהול מנהל
+// 7. טיפול בהודעות פרטיות / תהליכי ניהול מנהל
 // -------------------------------------------------------------
 bot.on(['message'], async (ctx, next) => {
-  // אם מדובר בקבוצה - מעבירים ללוגיקת הקבוצה
   if (ctx.chat.type !== 'private') return next();
   if (ctx.from.id !== ADMIN_ID) return next();
 
@@ -201,7 +169,7 @@ bot.on(['message'], async (ctx, next) => {
         return ctx.reply('❌ **קובץ לא תקין.** נסה שוב.');
       }
     } else {
-      return ctx.reply('⚠️️ אנא שלח קובץ JSON תקין.');
+      return ctx.reply('⚠️ אנא שלח קובץ JSON תקין.');
     }
   }
 
@@ -209,7 +177,6 @@ bot.on(['message'], async (ctx, next) => {
   if (session.step === 'AWAITING_MOVIE_MEDIA') {
     if (ctx.message.video || ctx.message.document) {
       try {
-        // העברה אוטומטית לערוץ האחסון
         const forwarded = await ctx.telegram.copyMessage(
           VAULT_CHANNEL_ID,
           ctx.chat.id,
@@ -221,7 +188,7 @@ bot.on(['message'], async (ctx, next) => {
           vaultMessageId: forwarded.message_id
         };
 
-        return ctx.reply('✅ **המדיה נשמרה באחסון!**\nעכשיו, הזן את שם החיפוש המדויק עבור הסרט (למשל: סרטון לדוגמא).');
+        return ctx.reply('✅ **המדיה נשמרה באחסון!**\nעכשיו, הזן את שם החיפוש המדויק עבור הסרט.');
       } catch (err) {
         return ctx.reply(`❌ **שגיאה בהעברה לערוץ האחסון:** ${err.message}`);
       }
@@ -255,7 +222,7 @@ bot.on(['message'], async (ctx, next) => {
   if (session.step === 'AWAITING_SERIES_MEDIA') {
     if (text === 'סיימתי להעלות') {
       if (!session.tempMedia || session.tempMedia.length === 0) {
-        return ctx.reply('⚠️ לא העלת אף פרק. אנא שלח פרקים או בחר ביטול.');
+        return ctx.reply('⚠️ לא העלת אף פרק. אנא שלח פרקים.');
       }
 
       adminSessions[ADMIN_ID].step = 'AWAITING_SERIES_TITLE';
@@ -331,13 +298,13 @@ bot.on(['message'], async (ctx, next) => {
 });
 
 // -------------------------------------------------------------
-// 9. מוח חלק 2: ניהול קבוצה, הגנה, ויראליות וחיפוש חכם
+// 8. ניהול קבוצה, הגנה, וחיפוש מבוסס ביצועים מהירים
 // -------------------------------------------------------------
 
 // א) הגנת ספאם, קישורים וקבצים בקבוצה
 bot.on(['document', 'video', 'photo', 'audio'], async (ctx, next) => {
   if (ctx.chat.type === 'private') return next();
-  if (ctx.from.id === ADMIN_ID) return next(); // מנהל מורשה
+  if (ctx.from.id === ADMIN_ID) return next();
 
   try {
     await ctx.deleteMessage();
@@ -397,25 +364,16 @@ bot.on('text', async (ctx) => {
     });
   }
 
-  // 4. בדיקת חיפוש במאגר הסרטים והסדרות
+  // 4. חיפוש ישיר במאגר הסרטים והסדרות
   const searchResults = db.movies.filter(m => {
     return lowerText.includes(m.title.toLowerCase()) || 
            m.aliases.some(alias => lowerText === alias);
   });
 
-  // חוויית בוט אנושית: הודעת טעינה ועריכה
+  // אם נמצאה תוצאה - שליחה מיידית של המדיה בלחיצה אחת
   if (searchResults.length > 0) {
-    // איפוס מפתח כישלונות
-    failedSearchAttempts[userId] = 0;
+    failedSearchAttempts[userId] = 0; // איפוס כישלונות
 
-    const loadingMsg = await ctx.reply('🔍 *מחפש במאגר...*', {
-      parse_mode: 'Markdown',
-      reply_to_message_id: ctx.message.message_id
-    });
-
-    await sleep(1200); // השהייה אנושית
-
-    // שליחת התוצאה/תוצאות (ניקוי טקסט מקורי והוספת חתימה מותאמת)
     for (const item of searchResults.slice(0, 3)) {
       try {
         await ctx.telegram.copyMessage(
@@ -431,22 +389,20 @@ bot.on('text', async (ctx) => {
         console.error(`[Copy Error] ${item.id}:`, err.message);
       }
     }
-
-    // מחיקת הודעת הטעינה לשמירה על פיד נקי
-    return ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id).catch(() => {});
+    return;
   }
 
   // 5. תוצאה לא נמצאה
   failedSearchAttempts[userId] = (failedSearchAttempts[userId] || 0) + 1;
 
-  // אמוג'י איקס כתגובה להודעה
+  // תגובת איקס מיידית להודעה
   try {
     await ctx.react('❌');
   } catch (err) {}
 
-  // אם המשתמש נכשל 3 פעמים
+  // אם המשתמש נכשל 3 פעמים רצופות
   if (failedSearchAttempts[userId] >= 3) {
-    failedSearchAttempts[userId] = 0; // איפוס
+    failedSearchAttempts[userId] = 0;
     return ctx.reply(
       `🧐 **אני רואה שלא מצאת את מה שחיפשת...**\n` +
       `💬 [דבר עם המנהל כאן](${ADMIN_CONTACT_LINK})`,
@@ -454,28 +410,22 @@ bot.on('text', async (ctx) => {
     );
   }
 
-  // ניסיון מענה דרך AI (אם זמין) או הודעת "לא נמצא" רגילה
-  let aiText = null;
-  if (aiKeys.length > 0) {
-    const prompt = `השתמש בשם הסרט: "${text}". ענה קצר ובחרוז בעברית שהסרט לא נמצא במאגר כרגע.`;
-    aiText = await generateAIResponse(prompt);
-  }
-
-  const finalNotFoundText = aiText || 
+  // הודעת "לא נמצא" מעוצבת וחדה
+  return ctx.reply(
     `⚠️ **הסרט/הסדרה לא נמצא!**\n` +
-    `בבקשה לחפש שם סרט או סדרה בלבד עם רווחים.`;
-
-  return ctx.reply(finalNotFoundText, {
-    parse_mode: 'Markdown',
-    reply_to_message_id: ctx.message.message_id
-  });
+    `בבקשה לחפש שם סרט או סדרה בלבד עם רווחים.`,
+    {
+      parse_mode: 'Markdown',
+      reply_to_message_id: ctx.message.message_id
+    }
+  );
 });
 
 // -------------------------------------------------------------
-// 10. הפעלת הבוט ותפיסת שגיאות
+// 9. הפעלת הבוט
 // -------------------------------------------------------------
 bot.launch().then(() => {
-  console.log('🤖 הבוט פעיל, מחובר למאגר ומוכן לעבודה!');
+  console.log('⚡ הבוט פעיל במוד מהיר (ללא AI/השהיות) ומוכן לעבודה!');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
