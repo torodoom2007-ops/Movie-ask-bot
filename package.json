@@ -1,0 +1,16 @@
+{
+  "name": "telegram-movies-bot",
+  "version": "1.0.0",
+  "description": "Telegram Movie & Series Search Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "telegraf": "^4.16.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
