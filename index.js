@@ -1,432 +1,383 @@
-const { Telegraf, Markup } = require('telegraf');
+const { Telegraf, Markup, session } = require('telegraf');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
-// -------------------------------------------------------------
-// 1. קונפיגורציה ומשתני סביבה
-// -------------------------------------------------------------
-const BOT_TOKEN = process.env.BOT_TOKEN;
+// הגדרות בסיס
 const ADMIN_ID = 8017590244;
-const VAULT_CHANNEL_ID = -1004295952149; // ערוץ האחסון מאחורי הקלעים
-const SIGNATURE_LINK = 'https://t.me/movie_time_by';
-const ADMIN_CONTACT_LINK = 'https://t.me/admi_nos';
+const BOT_TOKEN = process.env.BOT_TOKEN;
 
 if (!BOT_TOKEN) {
-  console.error('❌ שגיאה: יש להגדיר BOT_TOKEN במשתני הסביבה!');
+  console.error("שגיאה: חסר BOT_TOKEN בהגדרות הסביבה (Environment Variables)");
   process.exit(1);
 }
 
-// -------------------------------------------------------------
-// 2. שרת Express ל-Render (Health Check)
-// -------------------------------------------------------------
+const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('🍿 Movie Fast Bot is Running!'));
-app.listen(PORT, () => console.log(`[HTTP] Server listening on port ${PORT}`));
 
-// -------------------------------------------------------------
-// 3. ניהול מאגר הנתונים (JSON Persistence)
-// -------------------------------------------------------------
-const DB_PATH = path.join(__dirname, 'movies_db.json');
-let db = { movies: [], channels: [] };
+// שרת בריאות עבור Render
+app.get('/', (req, res) => res.send('Bot is active and running!'));
+app.listen(PORT, () => console.log(`HTTP Server running on port ${PORT}`));
 
-function loadDB() {
+// ניהול זיכרון ומאגר נתונים בסיסי
+const DB_FILE = path.join(__dirname, 'database.json');
+let db = {
+  quickResponses: {}, // trigger -> { type, content, buttons: [[{text, url}]], scope: 'private'|'public' }
+  agents: [],         // [{ photo, name, desc, link }]
+  personaConfig: { enabled: false, prompt: "אתה עוזר אדיב ואנושי" }
+};
+
+// טעינת נתונים
+if (fs.existsSync(DB_FILE)) {
   try {
-    if (fs.existsSync(DB_PATH)) {
-      const data = fs.readFileSync(DB_PATH, 'utf8');
-      db = JSON.parse(data);
-      if (!db.movies) db.movies = [];
-      if (!db.channels) db.channels = [];
-      console.log(`[DB] נטענו ${db.movies.length} פריטים ו-${db.channels.length} ערוצים.`);
-    }
-  } catch (err) {
-    console.error('[DB Error] שגיאה בטעינה:', err.message);
+    db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+  } catch (e) {
+    console.error("שגיאה שטעינת בסיס הנתונים, מעלה ברירת מחדל");
   }
 }
 
 function saveDB() {
-  try {
-    fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
-  } catch (err) {
-    console.error('[DB Error] שגיאה בשמירה:', err.message);
-  }
+  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
-loadDB();
+bot.use(session());
 
-// -------------------------------------------------------------
-// 4. ניהול סשנים בזיכרון & מעקב כישלונות
-// -------------------------------------------------------------
-const adminSessions = {}; // { [adminId]: { step, tempMedia: [], ... } }
-const failedSearchAttempts = {}; // { [userId]: count }
+// בדיקת הרשאות מנהל
+const isAdmin = (ctx) => ctx.from && Number(ctx.from.id) === ADMIN_ID;
 
-// שליחת גיבוי אוטומטי למנהל
-async function sendBackupToAdmin(ctx) {
-  try {
-    saveDB();
-    await ctx.telegram.sendDocument(ADMIN_ID, {
-      source: DB_PATH,
-      filename: 'movies_db.json'
-    }, {
-      caption: `📦 **גיבוי מאגר מעודכן!**\nסה"כ סרטים/סדרות: **${db.movies.length}**\nסה"כ ערוצים/קבוצות: **${db.channels.length}**`,
-      parse_mode: 'Markdown'
-    });
-  } catch (err) {
-    console.error('[Backup Error]', err.message);
-  }
-}
-
-// מקלדת מנהל ראשית
+// תפריט מנהל ראשי
 function getAdminKeyboard() {
   return Markup.keyboard([
-    ['🎬 הוסף סרט', '📺 הוסף סדרה'],
-    ['🔗 הוסף ערוץ/קבוצה', '🔄 שחזר מאגר ידני'],
-    ['📊 מצב מאגר']
+    ['⚡ הוספת תגובה מהירה', '📋 רשימת תגובות'],
+    ['🕵️‍♂️ הוספת סוכן', '👥 רשימת סוכנים'],
+    ['👷‍♂️ הגדרות דמות / AI', '❌ ביטול תהליך']
   ]).resize();
 }
 
-// -------------------------------------------------------------
-// 5. אתחול הבוט
-// -------------------------------------------------------------
-const bot = new Telegraf(BOT_TOKEN);
+// איפוס סשן
+function resetStep(ctx) {
+  if (ctx.session) ctx.session.step = null;
+}
 
-// -------------------------------------------------------------
-// 6. פאנל ניהול (מנהל בלבד ID: 8017590244)
-// -------------------------------------------------------------
-
+// --- פקודת להתחלה / מנהל ---
 bot.start(async (ctx) => {
-  if (ctx.from.id === ADMIN_ID && ctx.chat.type === 'private') {
-    adminSessions[ADMIN_ID] = { step: 'IDLE' };
-    return ctx.reply('👋 **שלום מנהל!** ברוך הבא לפאנל השליטה.', {
-      parse_mode: 'Markdown',
-      ...getAdminKeyboard()
-    });
+  if (isAdmin(ctx)) {
+    resetStep(ctx);
+    return ctx.reply('שלום המנהל! המוח של הבוט מוכן לניהול. בחר פעולה:', getAdminKeyboard());
   }
+  return ctx.reply('שלום! במה אוכל לעזור?');
+});
+
+bot.hears('❌ ביטול תהליך', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  resetStep(ctx);
+  await ctx.reply('התהליך בוטל בהצלחה.', getAdminKeyboard());
+});
+
+// ==========================================
+// 1. מנגנון תגובות מהירות
+// ==========================================
+
+bot.hears('⚡ הוספת תגובה מהירה', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  ctx.session = { step: 'AWAITING_QR_TRIGGER' };
+  await ctx.reply('הזן את מילת המפתח/הטריגר לתגובה המהירה (לדוגמה: "היי" או "מחיר"):');
+});
+
+bot.hears('📋 רשימת תגובות', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const keys = Object.keys(db.quickResponses);
+  if (keys.length === 0) return ctx.reply('אין כרגע תגובות מהירות מוגדרות.');
   
-  await ctx.reply('👋 **ברוכים הבאים לבוט הסרטים והסדרות!**\nחפשו שם סרט או סדרה בלבד בקבוצה.', {
-    parse_mode: 'Markdown'
+  let msg = '<b>תגובות מהירות קיימות:</b>\n\n';
+  keys.forEach((k) => {
+    const item = db.quickResponses[k];
+    msg += `• <b>${k}</b> (${item.scope === 'public' ? '🌐 ציבורי' : '🔒 פרטי'}) - סוג: ${item.type}\n`;
   });
+  await ctx.replyWithHTML(msg);
 });
 
-// טיפול בכפתורי תפריט מנהל
-bot.hears('🎬 הוסף סרט', async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  adminSessions[ADMIN_ID] = { step: 'AWAITING_MOVIE_MEDIA' };
-  await ctx.reply('✨ **הוספת סרט חדש**\nאנא שלח/העבר את קובץ הסרט כעת.');
+// ==========================================
+// 2. מנגנון סוכנים
+// ==========================================
+
+bot.hears('🕵️‍♂️ הוספת סוכן', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  ctx.session = { step: 'AWAITING_AGENT_PHOTO' };
+  await ctx.reply('שלח תמונה עבור הכרטיס של הסוכן/סוכנת:');
 });
 
-bot.hears('📺 הוסף סדרה', async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  adminSessions[ADMIN_ID] = { step: 'AWAITING_SERIES_MEDIA', tempMedia: [] };
-  await ctx.reply('✨ **הוספת סדרה חדשה**\nשלח/העבר את כל פרקי הסדרה ברצף.\nכאשר תסיים, שלח את הטקסט: **"סיימתי להעלות"**.');
+bot.hears('👥 רשימת סוכנים', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  if (db.agents.length === 0) return ctx.reply('אין סוכנים מוגדרים במערכת.');
+
+  for (const agent of db.agents) {
+    const caption = `<b>${agent.name}</b>\n\n${agent.desc}`;
+    const keyboard = Markup.inlineKeyboard([[Markup.button.url('פתיחת פנייה 🚀', agent.link)]]);
+    await ctx.replyWithPhoto(agent.photo, { caption, parse_mode: 'HTML', ...keyboard });
+  }
 });
 
-bot.hears('🔗 הוסף ערוץ/קבוצה', async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  adminSessions[ADMIN_ID] = { step: 'AWAITING_CHANNEL_LINK' };
-  await ctx.reply('🔗 **הוספת קישור לערוץ/קבוצה**\nאנא שלח את הקישור (למשל: https://t.me/example).');
+// ==========================================
+// 3. מודול דמות / AI (משתמש/ת 👷‍♂️)
+// ==========================================
+
+bot.hears('👷‍♂️ הגדרות דמות / AI', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const status = db.personaConfig.enabled ? 'פעיל ✅' : 'כבוי ❌';
+  await ctx.reply(
+    `הגדרות דמות/עוזר AI:\nסטטוס נוכחי: ${status}\nפרומפט נוכחי: "${db.personaConfig.prompt}"`,
+    Markup.inlineKeyboard([
+      [Markup.button.callback(db.personaConfig.enabled ? 'כיבוי מודול AI' : 'הפעלת מודול AI', 'toggle_ai')],
+      [Markup.button.callback('שינוי פרומפט דמות', 'change_ai_prompt')]
+    ])
+  );
 });
 
-bot.hears('🔄 שחזר מאגר ידני', async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  adminSessions[ADMIN_ID] = { step: 'AWAITING_RESTORE_FILE' };
-  await ctx.reply('📂 **שחזור מאגר**\nאנא שלח קובץ `movies_db.json` מעודכן לשחזור.');
+bot.action('toggle_ai', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  db.personaConfig.enabled = !db.personaConfig.enabled;
+  saveDB();
+  await ctx.answerCbQuery('סטטוס AI עודכן!');
+  await ctx.editMessageText(`סטטוס מודול AI עודכן ל: ${db.personaConfig.enabled ? 'פעיל ✅' : 'כבוי ❌'}`);
 });
 
-bot.hears('📊 מצב מאגר', async (ctx) => {
-  if (ctx.from.id !== ADMIN_ID) return;
-  await ctx.reply(`🎉 **תמונה מצב מאגר:**\n\n🎬 סרטים/פרקים: **${db.movies.length}**\n🔗 ערוצים/קבוצות: **${db.channels.length}**`, {
-    parse_mode: 'Markdown'
-  });
+bot.action('change_ai_prompt', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  ctx.session = { step: 'AWAITING_AI_PROMPT' };
+  await ctx.answerCbQuery();
+  await ctx.reply('שלח את הנחיית הבסיס (Prompt) עבור הדמות של הבוט:');
 });
 
-// -------------------------------------------------------------
-// 7. טיפול בהודעות פרטיות / תהליכי ניהול מנהל
-// -------------------------------------------------------------
-bot.on(['message'], async (ctx, next) => {
-  if (ctx.chat.type !== 'private') return next();
-  if (ctx.from.id !== ADMIN_ID) return next();
+// ==========================================
+// הטיפול המרכזי בכל שלבי ה-Wizard (מנהל)
+// ==========================================
 
-  const session = adminSessions[ADMIN_ID] || { step: 'IDLE' };
-  const text = ctx.message.text;
+bot.on('message', async (ctx, next) => {
+  if (!isAdmin(ctx) || !ctx.session || !ctx.session.step) return next();
 
-  // 1. שחזור מאגר מקובץ JSON
-  if (session.step === 'AWAITING_RESTORE_FILE') {
-    if (ctx.message.document && ctx.message.document.file_name.endsWith('.json')) {
-      try {
-        const fileLink = await ctx.telegram.getFileLink(ctx.message.document.file_id);
-        const response = await fetch(fileLink.href);
-        const json = await response.json();
-        
-        if (json.movies && Array.isArray(json.movies)) {
-          db = json;
-          saveDB();
-          adminSessions[ADMIN_ID] = { step: 'IDLE' };
-          return ctx.reply(`✅ **המאגר שוחזר בהצלחה!**\nנטענו **${db.movies.length}** פריטים.`, getAdminKeyboard());
-        }
-      } catch (err) {
-        return ctx.reply('❌ **קובץ לא תקין.** נסה שוב.');
-      }
+  const step = ctx.session.step;
+
+  // --- תגובה מהירה: קליטת מילת מפתח ---
+  if (step === 'AWAITING_QR_TRIGGER') {
+    ctx.session.qrTrigger = ctx.message.text.trim();
+    ctx.session.step = 'AWAITING_QR_CONTENT';
+    return ctx.reply('מעולה! עכשיו שלח את התוכן של התגובה (טקסט, תמונה, סרטון, קובץ, או הודעה קולית):');
+  }
+
+  // --- תגובה מהירה: קליטת תוכן והצגת תצוגה מקדימה ---
+  if (step === 'AWAITING_QR_CONTENT') {
+    let type = 'text';
+    let content = null;
+
+    if (ctx.message.text) {
+      type = 'text';
+      content = ctx.message.text;
+    } else if (ctx.message.photo) {
+      type = 'photo';
+      content = { file_id: ctx.message.photo[ctx.message.photo.length - 1].file_id, caption: ctx.message.caption || '' };
+    } else if (ctx.message.video) {
+      type = 'video';
+      content = { file_id: ctx.message.video.file_id, caption: ctx.message.caption || '' };
+    } else if (ctx.message.document) {
+      type = 'document';
+      content = { file_id: ctx.message.document.file_id, caption: ctx.message.caption || '' };
+    } else if (ctx.message.voice) {
+      type = 'voice';
+      content = { file_id: ctx.message.voice.file_id, caption: ctx.message.caption || '' };
     } else {
-      return ctx.reply('⚠️ אנא שלח קובץ JSON תקין.');
-    }
-  }
-
-  // 2. הוספת סרט - העברת מדיה
-  if (session.step === 'AWAITING_MOVIE_MEDIA') {
-    if (ctx.message.video || ctx.message.document) {
-      try {
-        const forwarded = await ctx.telegram.copyMessage(
-          VAULT_CHANNEL_ID,
-          ctx.chat.id,
-          ctx.message.message_id
-        );
-
-        adminSessions[ADMIN_ID] = {
-          step: 'AWAITING_MOVIE_TITLE',
-          vaultMessageId: forwarded.message_id
-        };
-
-        return ctx.reply('✅ **המדיה נשמרה באחסון!**\nעכשיו, הזן את שם החיפוש המדויק עבור הסרט.');
-      } catch (err) {
-        return ctx.reply(`❌ **שגיאה בהעברה לערוץ האחסון:** ${err.message}`);
-      }
-    } else {
-      return ctx.reply('⚠️ אנא שלח קובץ וידאו/מסמך סרט.');
-    }
-  }
-
-  // הוספת סרט - שמירת שם חיפוש
-  if (session.step === 'AWAITING_MOVIE_TITLE' && text) {
-    const movieTitle = text.trim();
-    const newMovie = {
-      id: `mov_${Date.now()}`,
-      title: movieTitle,
-      aliases: movieTitle.toLowerCase().split(' '),
-      from_chat_id: VAULT_CHANNEL_ID,
-      message_id: session.vaultMessageId,
-      type: 'movie'
-    };
-
-    db.movies.push(newMovie);
-    saveDB();
-    adminSessions[ADMIN_ID] = { step: 'IDLE' };
-
-    await ctx.reply(`🎉 **הסרט "${movieTitle}" נוסף בהצלחה למאגר!**`, getAdminKeyboard());
-    await sendBackupToAdmin(ctx);
-    return;
-  }
-
-  // 3. הוספת סדרה - קבלת פרקים מרובים
-  if (session.step === 'AWAITING_SERIES_MEDIA') {
-    if (text === 'סיימתי להעלות') {
-      if (!session.tempMedia || session.tempMedia.length === 0) {
-        return ctx.reply('⚠️ לא העלת אף פרק. אנא שלח פרקים.');
-      }
-
-      adminSessions[ADMIN_ID].step = 'AWAITING_SERIES_TITLE';
-      return ctx.reply(`👍 נקלטו **${session.tempMedia.length}** פרקים.\nכעת הזן את שם הסדרה והעונה (למשל: סדרה לדוגמא עונה 1).`);
+      return ctx.reply('סוג הודעה לא נתמך. אנא שלח טקסט, תמונה, וידאו, קובץ או קול בלבד.');
     }
 
-    if (ctx.message.video || ctx.message.document) {
-      try {
-        const forwarded = await ctx.telegram.copyMessage(
-          VAULT_CHANNEL_ID,
-          ctx.chat.id,
-          ctx.message.message_id
-        );
-        session.tempMedia.push(forwarded.message_id);
-        return ctx.reply(`📥 פרק ${session.tempMedia.length} נקלט באחסון.`);
-      } catch (err) {
-        return ctx.reply(`❌ שגיאה בשמירת הפרק: ${err.message}`);
-      }
-    }
+    ctx.session.qrType = type;
+    ctx.session.qrContent = content;
+    ctx.session.qrButtons = [];
+
+    return sendQRPreviewAndPromptButtons(ctx);
   }
 
-  // הוספת סדרה - שמירת שם עונה ומספור אוטומטי
-  if (session.step === 'AWAITING_SERIES_TITLE' && text) {
-    const seriesBaseTitle = text.trim();
-    const mediaList = session.tempMedia || [];
+  // --- תגובה מהירה: קליטת טקסט לכפתור ---
+  if (step === 'AWAITING_BTN_TEXT') {
+    ctx.session.tempBtnText = ctx.message.text;
+    ctx.session.step = 'AWAITING_BTN_URL';
+    return ctx.reply('שלח כעת את הקישור (URL) עבור הכפתור (לדוגמה: https://t.me/...):');
+  }
 
-    mediaList.forEach((msgId, idx) => {
-      const epNum = idx + 1;
-      const fullTitle = `${seriesBaseTitle} פרק ${epNum}`;
-      db.movies.push({
-        id: `ser_${Date.now()}_${epNum}`,
-        title: fullTitle,
-        aliases: fullTitle.toLowerCase().split(' '),
-        from_chat_id: VAULT_CHANNEL_ID,
-        message_id: msgId,
-        type: 'series'
-      });
+  // --- תגובה מהירה: קליטת URL לכפתור ---
+  if (step === 'AWAITING_BTN_URL') {
+    const url = ctx.message.text.trim();
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      return ctx.reply('קישור לא תקין. אנא שלח קישור המתחיל ב-http:// או https://');
+    }
+
+    ctx.session.qrButtons.push([{ text: ctx.session.tempBtnText, url: url }]);
+    delete ctx.session.tempBtnText;
+
+    return sendQRPreviewAndPromptButtons(ctx);
+  }
+
+  // --- סוכנים: תמונה ---
+  if (step === 'AWAITING_AGENT_PHOTO') {
+    if (!ctx.message.photo) return ctx.reply('אנא שלח תמונה תקינה.');
+    ctx.session.agentPhoto = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+    ctx.session.step = 'AWAITING_AGENT_NAME';
+    return ctx.reply('הזן את שם הסוכן/סוכנת:');
+  }
+
+  // --- סוכנים: שם ---
+  if (step === 'AWAITING_AGENT_NAME') {
+    ctx.session.agentName = ctx.message.text;
+    ctx.session.step = 'AWAITING_AGENT_DESC';
+    return ctx.reply('הזן תיאור קצר עבור הסוכן/סוכנת:');
+  }
+
+  // --- סוכנים: תיאור ---
+  if (step === 'AWAITING_AGENT_DESC') {
+    ctx.session.agentDesc = ctx.message.text;
+    ctx.session.step = 'AWAITING_AGENT_LINK';
+    return ctx.reply('הזן קישור לפנייה ישירה לסוכן (לדוגמה: https://t.me/username):');
+  }
+
+  // --- סוכנים: קישור וסיום ---
+  if (step === 'AWAITING_AGENT_LINK') {
+    const link = ctx.message.text.trim();
+    db.agents.push({
+      photo: ctx.session.agentPhoto,
+      name: ctx.session.agentName,
+      desc: ctx.session.agentDesc,
+      link: link
     });
-
     saveDB();
-    adminSessions[ADMIN_ID] = { step: 'IDLE' };
-
-    await ctx.reply(`🎉 **הסדרה "${seriesBaseTitle}" (${mediaList.length} פרקים) נשמרה בהצלחה!**`, getAdminKeyboard());
-    await sendBackupToAdmin(ctx);
-    return;
+    resetStep(ctx);
+    return ctx.reply('הסוכן נוצר ונשמר בהצלחה!', getAdminKeyboard());
   }
 
-  // 4. הוספת ערוץ/קבוצה
-  if (session.step === 'AWAITING_CHANNEL_LINK' && text) {
-    adminSessions[ADMIN_ID] = {
-      step: 'AWAITING_CHANNEL_QUERY',
-      tempLink: text.trim()
-    };
-    return ctx.reply('כעת הזן את מילת/שם החיפוש עבור ערוץ זה:');
-  }
-
-  if (session.step === 'AWAITING_CHANNEL_QUERY' && text) {
-    db.channels.push({
-      id: `chan_${Date.now()}`,
-      link: session.tempLink,
-      query: text.trim().toLowerCase()
-    });
-
+  // --- AI Prompt ---
+  if (step === 'AWAITING_AI_PROMPT') {
+    db.personaConfig.prompt = ctx.message.text;
     saveDB();
-    adminSessions[ADMIN_ID] = { step: 'IDLE' };
-
-    await ctx.reply(`🎉 **הערוץ/קבוצה נוספו בהצלחה למאגר!**`, getAdminKeyboard());
-    await sendBackupToAdmin(ctx);
-    return;
+    resetStep(ctx);
+    return ctx.reply('פרומפט הדמות עודכן בהצלחה!', getAdminKeyboard());
   }
 
   return next();
 });
 
-// -------------------------------------------------------------
-// 8. ניהול קבוצה, הגנה, וחיפוש מבוסס ביצועים מהירים
-// -------------------------------------------------------------
+// הצגת תצוגה מקדימה ובחירת כפתורים
+async function sendQRPreviewAndPromptButtons(ctx) {
+  await ctx.reply('<b>--- תצוגה מקדימה ---</b>', { parse_mode: 'HTML' });
+  await sendMediaMessage(ctx, ctx.chat.id, ctx.session.qrType, ctx.session.qrContent, ctx.session.qrButtons);
 
-// א) הגנת ספאם, קישורים וקבצים בקבוצה
-bot.on(['document', 'video', 'photo', 'audio'], async (ctx, next) => {
-  if (ctx.chat.type === 'private') return next();
-  if (ctx.from.id === ADMIN_ID) return next();
+  ctx.session.step = 'AWAITING_BTN_DECISION';
 
-  try {
-    await ctx.deleteMessage();
-    const warnMsg = await ctx.reply(
-      `🚫 **[${ctx.from.first_name}](tg://user?id=${ctx.from.id}) אסור לפרסם קבצים או קישורים בקבוצה!**\n\n` +
-      `💼 אבל אנחנו מחפשים מנהלים! [הגש מועמדות כאן](${ADMIN_CONTACT_LINK})`,
-      { parse_mode: 'Markdown', disable_web_page_preview: true }
-    );
-    setTimeout(() => ctx.telegram.deleteMessage(ctx.chat.id, warnMsg.message_id).catch(() => {}), 10000);
-  } catch (err) {
-    console.error('[Anti-Spam Error]', err.message);
-  }
+  return ctx.reply(
+    'תוכל להוסיף כפתור אינליין או להתקדם לבחירת הגדרת הפרטיות:',
+    Markup.inlineKeyboard([
+      [Markup.button.callback('➕ הוסף כפתור קישור', 'add_inline_btn')],
+      [Markup.button.callback('✅ המשך לבחירת היקף (פרטי/ציבורי)', 'finish_buttons')]
+    ])
+  );
+}
+
+// Inline Callback Actions עבור תהליך התגובה המהירה
+bot.action('add_inline_btn', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.answerCbQuery();
+  ctx.session.step = 'AWAITING_BTN_TEXT';
+  await ctx.reply('הזן את הטקסט שיופיע על הכפתור:');
 });
 
-// ב) זיהוי הודעות טקסט בקבוצות
-bot.on('text', async (ctx) => {
-  if (ctx.chat.type === 'private') return;
-
-  const text = ctx.message.text.trim();
-  const lowerText = text.toLowerCase();
-  const userId = ctx.from.id;
-
-  // 1. בדיקת קישורים בטקסט
-  if (text.includes('http://') || text.includes('https://') || text.includes('t.me/')) {
-    if (userId !== ADMIN_ID) {
-      try {
-        await ctx.deleteMessage();
-        const warn = await ctx.reply(
-          `🚫 **[${ctx.from.first_name}](tg://user?id=${userId}) אסור לפרסם קישורים בקבוצה!**\n\n` +
-          `💼 אנחנו מחפשים מנהלים! [הגש מועמדות כאן](${ADMIN_CONTACT_LINK})`,
-          { parse_mode: 'Markdown', disable_web_page_preview: true }
-        );
-        setTimeout(() => ctx.telegram.deleteMessage(ctx.chat.id, warn.message_id).catch(() => {}), 10000);
-        return;
-      } catch (e) {}
-    }
-  }
-
-  // 2. מילות טריגר אסורות ("אפשר את", "יש לכם", וכו')
-  const triggerWords = ['אפשר את', 'יש לכם', 'אפשר', 'יש'];
-  const startsWithTrigger = triggerWords.some(word => lowerText.startsWith(word));
-
-  if (startsWithTrigger && text.split(' ').length < 5) {
-    return ctx.reply('⚠️ **נא להזין שם סרט או סדרה בלבד!**', {
-      reply_to_message_id: ctx.message.message_id
-    });
-  }
-
-  // 3. בדיקת תאימות מול ערוצים/קבוצות שמוגדרים במאגר
-  const matchedChannel = db.channels.find(c => lowerText.includes(c.query));
-  if (matchedChannel) {
-    return ctx.reply(`✨ **נמצא קישור מתאים עבור "${text}":**`, {
-      reply_to_message_id: ctx.message.message_id,
-      ...Markup.inlineKeyboard([
-        [Markup.button.url('🔗 לחץ למעבר לערוץ/קבוצה', matchedChannel.link)]
-      ])
-    });
-  }
-
-  // 4. חיפוש ישיר במאגר הסרטים והסדרות
-  const searchResults = db.movies.filter(m => {
-    return lowerText.includes(m.title.toLowerCase()) || 
-           m.aliases.some(alias => lowerText === alias);
-  });
-
-  // אם נמצאה תוצאה - שליחה מיידית של המדיה בלחיצה אחת
-  if (searchResults.length > 0) {
-    failedSearchAttempts[userId] = 0; // איפוס כישלונות
-
-    for (const item of searchResults.slice(0, 3)) {
-      try {
-        await ctx.telegram.copyMessage(
-          ctx.chat.id,
-          item.from_chat_id,
-          item.message_id,
-          {
-            caption: `🎬 **${item.title}**\n\n🍿 לצפייה בערוץ הרשמי שלנו: ${SIGNATURE_LINK}`,
-            parse_mode: 'Markdown'
-          }
-        );
-      } catch (err) {
-        console.error(`[Copy Error] ${item.id}:`, err.message);
-      }
-    }
-    return;
-  }
-
-  // 5. תוצאה לא נמצאה
-  failedSearchAttempts[userId] = (failedSearchAttempts[userId] || 0) + 1;
-
-  // תגובת איקס מיידית להודעה
-  try {
-    await ctx.react('❌');
-  } catch (err) {}
-
-  // אם המשתמש נכשל 3 פעמים רצופות
-  if (failedSearchAttempts[userId] >= 3) {
-    failedSearchAttempts[userId] = 0;
-    return ctx.reply(
-      `🧐 **אני רואה שלא מצאת את מה שחיפשת...**\n` +
-      `💬 [דבר עם המנהל כאן](${ADMIN_CONTACT_LINK})`,
-      { parse_mode: 'Markdown', reply_to_message_id: ctx.message.message_id }
-    );
-  }
-
-  // הודעת "לא נמצא" מעוצבת וחדה
-  return ctx.reply(
-    `⚠️ **הסרט/הסדרה לא נמצא!**\n` +
-    `בבקשה לחפש שם סרט או סדרה בלבד עם רווחים.`,
+bot.action('finish_buttons', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.answerCbQuery();
+  ctx.session.step = 'AWAITING_SCOPE';
+  await ctx.reply(
+    'בחר היכן התגובה המהירה תפעל:\n\n' +
+    '• <b>פרטי</b>: תפעל רק בצ'אט פרטי מול הבוט.\n' +
+    '• <b>ציבורי</b>: תפעל גם בתוך קבוצות.',
     {
-      parse_mode: 'Markdown',
-      reply_to_message_id: ctx.message.message_id
+      parse_mode: 'HTML',
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback('🔒 פרטי בלבד', 'scope_private')],
+        [Markup.button.callback('🌐 ציבורי (גם בקבוצות)', 'scope_public')]
+      ])
     }
   );
 });
 
-// -------------------------------------------------------------
-// 9. הפעלת הבוט
-// -------------------------------------------------------------
-bot.launch().then(() => {
-  console.log('⚡ הבוט פעיל במוד מהיר (ללא AI/השהיות) ומוכן לעבודה!');
+bot.action(/^scope_(private|public)$/, async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const scope = ctx.match[1];
+  await ctx.answerCbQuery();
+
+  const trigger = ctx.session.qrTrigger;
+  db.quickResponses[trigger] = {
+    type: ctx.session.qrType,
+    content: ctx.session.qrContent,
+    buttons: ctx.session.qrButtons || [],
+    scope: scope
+  };
+
+  saveDB();
+  resetStep(ctx);
+
+  await ctx.reply(`התגובה המהירה עבור "${trigger}" נשמרה בהצלחה! (${scope === 'public' ? '🌐 ציבורי' : '🔒 פרטי'})`, getAdminKeyboard());
 });
+
+// ==========================================
+// 4. מנגנון מענה למשתמשים בקבוצות ובפרטי
+// ==========================================
+
+bot.on('message', async (ctx) => {
+  const text = ctx.message.text || ctx.message.caption;
+  if (!text) return;
+
+  const chatType = ctx.chat.type; // 'private', 'group', 'supergroup'
+  const isPrivate = chatType === 'private';
+
+  // חיפוש תגובה מהירה תואמת
+  const matchedKey = Object.keys(db.quickResponses).find(k => text.trim().toLowerCase() === k.toLowerCase());
+
+  if (matchedKey) {
+    const item = db.quickResponses[matchedKey];
+
+    // בדיקת הרשאת פרטי / ציבורי
+    if (item.scope === 'private' && !isPrivate) {
+      return; // התגובה מוגדרת לפרטי בלבד וההודעה נשלחה בקבוצה
+    }
+
+    return sendMediaMessage(ctx, ctx.chat.id, item.type, item.content, item.buttons);
+  }
+
+  // אם לא נמצאה תגובה מהירה ומודול ה-AI פעיל
+  if (db.personaConfig.enabled && isPrivate) {
+    await ctx.sendChatAction('typing');
+    // כאן מתחברים למודול AI/עוזר (ניתן לחבר OpenAI / Gemini במידת הצורך)
+    const replyText = `[תגובת AI - דמות]: קיבלתי את ההודעה "${text}". (הפרומפט מוגדר כ: ${db.personaConfig.prompt})`;
+    return ctx.reply(replyText);
+  }
+});
+
+// פונקציית עזר לשליחת מדיה עם כפתורים
+async function sendMediaMessage(ctx, chatId, type, content, buttons = []) {
+  const keyboard = buttons.length > 0 ? Markup.inlineKeyboard(buttons) : undefined;
+
+  switch (type) {
+    case 'text':
+      return ctx.telegram.sendMessage(chatId, content, keyboard);
+    case 'photo':
+      return ctx.telegram.sendPhoto(chatId, content.file_id, { caption: content.caption, ...keyboard });
+    case 'video':
+      return ctx.telegram.sendVideo(chatId, content.file_id, { caption: content.caption, ...keyboard });
+    case 'document':
+      return ctx.telegram.sendDocument(chatId, content.file_id, { caption: content.caption, ...keyboard });
+    case 'voice':
+      return ctx.telegram.sendVoice(chatId, content.file_id, { caption: content.caption, ...keyboard });
+  }
+}
+
+bot.launch().then(() => console.log('Bot is running successfully!'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
