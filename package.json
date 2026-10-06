@@ -1,12 +1,13 @@
 {
-  "name": "telegram-movies-bot",
-  "version": "1.0.0",
-  "description": "Telegram Movie & Series Search Bot",
+  "name": "telegram-movie-master",
+  "version": "2.0.0",
+  "description": "Advanced Telegram Movie & Community Management Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.14.1",
     "express": "^4.19.2",
     "telegraf": "^4.16.3"
   },
