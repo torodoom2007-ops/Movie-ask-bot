@@ -1,7 +1,7 @@
 {
-  "name": "telegram-dual-brain-bot",
+  "name": "cinema-movies-series-bot",
   "version": "1.0.0",
-  "description": "Telegram Bot with Admin Panel, Quick Responses, Agents and AI Persona",
+  "description": "Professional Telegram Movie & Series Bot with Group Search, Automated DB Management and Premium Cinema Design",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
