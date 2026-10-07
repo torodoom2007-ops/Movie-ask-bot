@@ -18,9 +18,9 @@ const bot = new Telegraf(BOT_TOKEN);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// שרת HTTP קל לשמירה על השרת פעיל ב-Render
+// שרת HTTP קל לשמירה על השרת פעיל ב-Render 24/7
 app.get('/', (req, res) => {
-  res.send('🎬 השרת של בוט הסרטים והסדרות פעיל ורץ בהצלחה!');
+  res.send('⚡ השרת המהיר של בוט הסרטים והסדרות פעיל!');
 });
 
 app.listen(PORT, () => {
@@ -31,16 +31,16 @@ app.listen(PORT, () => {
 // ניהול מאגר נתונים (JSON Database)
 // ==========================================
 const DB_FILE = path.join(__dirname, 'movies_db.json');
-let db = { movies: [] };
+let db = { items: [] };
 
 function loadDB() {
   if (fs.existsSync(DB_FILE)) {
     try {
       db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-      if (!Array.isArray(db.movies)) db.movies = [];
+      if (!Array.isArray(db.items)) db.items = [];
     } catch (e) {
-      console.error("שגיאה בטעינת קובץ המאגר, יוצר מאגר חדש:", e);
-      db = { movies: [] };
+      console.error("שגיאה בטעינת קובץ המאגר:", e);
+      db = { items: [] };
     }
   } else {
     saveDB();
@@ -58,7 +58,7 @@ bot.use(session());
 let botUsername = '';
 bot.telegram.getMe().then((me) => {
   botUsername = me.username;
-  console.log(`🤖 הבוט מחובר בהצלחה בתור: @${botUsername}`);
+  console.log(`🤖 הבוט מחובר בהצלחה: @${botUsername}`);
 });
 
 const isAdmin = (ctx) => ctx.from && Number(ctx.from.id) === ADMIN_ID;
@@ -66,130 +66,159 @@ const isAdmin = (ctx) => ctx.from && Number(ctx.from.id) === ADMIN_ID;
 // תפריט מנהל ראשי
 function getAdminKeyboard() {
   return Markup.keyboard([
-    ['➕ הוספת סרט/סדרה', '🔍 חיפוש במאגר'],
+    ['⚡ מצב קליטה מהירה בהעברה (פעיל)', '📊 סטטיסטיקה'],
     ['📁 העלאת מאגר (JSON)', '📥 ייצוא מאגר (JSON)'],
-    ['📊 סטטיסטיקת מאגר', '❌ ביטול']
+    ['🗑️ מחיקת כל המאגר', '❌ ביטול']
   ]).resize();
 }
 
-function resetSession(ctx) {
-  if (ctx.session) ctx.session = {};
+// ==========================================
+// פונקציית פענוח אוטומטית (Auto-Parser)
+// ==========================================
+function parseMediaDetails(text = '') {
+  const cleanText = text.trim();
+  if (!cleanText) {
+    return { title: 'תוכן ללא שם', cleanTitle: 'תוכן ללא שם', type: 'movie', season: null, episode: null };
+  }
+
+  const lines = cleanText.split('\n');
+  const rawTitle = lines[0].replace(/[🎬📺🍿🎥⚡🔥]/g, '').trim();
+
+  let season = null;
+  let episode = null;
+  let type = 'movie';
+
+  // זיהוי פורמט S01E02 או S1E2 או S01 E02
+  const seMatch = cleanText.match(/S(\d+)\s*E(\d+)/i);
+  if (seMatch) {
+    season = parseInt(seMatch[1], 10);
+    episode = parseInt(seMatch[2], 10);
+    type = 'series';
+  } else {
+    // זיהוי בעברית או באנגלית: עונה X פרק Y
+    const seasonMatch = cleanText.match(/(?:עונה|season)\s*(\d+)/i);
+    const episodeMatch = cleanText.match(/(?:פרק|episode|ep)\s*(\d+)/i);
+
+    if (seasonMatch || episodeMatch) {
+      type = 'series';
+      if (seasonMatch) season = parseInt(seasonMatch[1], 10);
+      if (episodeMatch) episode = parseInt(episodeMatch[1], 10);
+    }
+  }
+
+  // ניקוי שם הסדרה/הסרט לצורך קיבוץ וחיפוש מדויק
+  let cleanTitle = rawTitle
+    .replace(/S\d+\s*E\d+/gi, '')
+    .replace(/(?:עונה|season)\s*\d+/gi, '')
+    .replace(/(?:פרק|episode|ep)\s*\d+/gi, '')
+    .replace(/[-|_]/g, ' ')
+    .trim();
+
+  if (!cleanTitle) cleanTitle = rawTitle;
+
+  return { title: rawTitle, cleanTitle, type, season, episode };
 }
 
 // ==========================================
-// פקודות פתיחה וניווט
+// פקודות ניווט ותפריטים
 // ==========================================
 
 bot.start(async (ctx) => {
   const startPayload = ctx.message.text.split(' ')[1];
 
-  // אם המשתמש הגיע דרך קישור ישיר לקבלת סרט/סדרה (Deep Linking)
+  // קבלת פריט בודד
   if (startPayload && startPayload.startsWith('get_')) {
-    const movieId = startPayload.replace('get_', '');
-    const item = db.movies.find(m => m.id === movieId);
+    const itemId = startPayload.replace('get_', '');
+    const item = db.items.find(i => i.id === itemId);
+    if (item) return sendItemToUser(ctx, item);
+    return ctx.reply('❌ הפריט המבוקש לא נמצא במאגר.');
+  }
 
-    if (item) {
-      await sendMovieCardToUser(ctx, item);
-      return;
-    } else {
-      return ctx.reply('❌ מצטערים, הסרט או הסדרה המבוקשים לא נמצאו במאגר.');
-    }
+  // הצגת סדרה שלמה
+  if (startPayload && startPayload.startsWith('series_')) {
+    const cleanTitle = decodeURIComponent(startPayload.replace('series_', ''));
+    return showSeriesMenu(ctx, cleanTitle);
   }
 
   if (isAdmin(ctx)) {
-    resetSession(ctx);
     return ctx.replyWithHTML(
-      `🍿 <b>ברוך הבא ללוח הניהול הממותג!</b>\n` +
-      `מכאן תוכל להוסיף תוכן במהירות, לנהל את המאגר ולהעלות קבצים.`,
+      `🍿 <b>מערכת קליטה מהירה מופעלת!</b>\n\n` +
+      `⚡ <b>איך מעלים עשרות סרטים ופרקים בדקה?</b>\n` +
+      `פשוט <b>תעביר (Forward)</b> לכאן הודעות, סרטונים, קבצים או קישורים מערוצים אחרים.\n` +
+      `הבוט יפענח וישמור אותם אוטומטית במאגר תוך שבריר שנייה!`,
       getAdminKeyboard()
     );
   }
 
   return ctx.replyWithHTML(
-    `🎬 <b>ברוכים הבאים לבוט הסרטים והסדרות הרשמי!</b> 🍿\n` +
+    `🎬 <b>ברוכים הבאים לבוט הקולנוע והסדרות!</b> 🍿\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `תוכלו לחפש סרטים וסדרות ישירות כאן או בקבוצות שלנו.\n\n` +
     `🔍 <b>איך מחפשים?</b>\n` +
-    `• שלחו לי שם של סרט/סדרה כאן בפרטי.\n` +
-    `• או רשמו בקבוצה: <code>/search שם הסרט</code>`
+    `• שלחו שם של סרט או סדרה בפרטי.\n` +
+    `• בקבוצות: רשמו <code>/search שם הסרט</code> או פשוט את שם הסרט.`
   );
 });
 
 bot.hears('❌ ביטול', async (ctx) => {
-  resetSession(ctx);
   if (isAdmin(ctx)) {
-    await ctx.reply('הפעולה בוטלה בהצלחה.', getAdminKeyboard());
-  } else {
-    await ctx.reply('הפעולה בוטלה.');
+    await ctx.reply('הפעולה בוטלה.', getAdminKeyboard());
   }
 });
 
-// ==========================================
-// 1. הוספת סרט/סדרה במהירות (Wizard)
-// ==========================================
-
-bot.hears('➕ הוספת סרט/סדרה', async (ctx) => {
+bot.hears('📊 סטטיסטיקה', async (ctx) => {
   if (!isAdmin(ctx)) return;
-  ctx.session = { step: 'AWAIT_TYPE' };
+  const total = db.items.length;
+  const movies = db.items.filter(i => i.type === 'movie').length;
+  const seriesEpisodes = db.items.filter(i => i.type === 'series').length;
+
+  // חישוב כמות סדרות ייחודיות
+  const uniqueSeries = new Set(db.items.filter(i => i.type === 'series').map(i => i.cleanTitle.toLowerCase())).size;
 
   await ctx.replyWithHTML(
-    `🎬 <b>הוספת תוכן חדש למאגר</b>\n` +
-    `בחר את סוג התוכן שברצונך להוסיף:`,
-    Markup.inlineKeyboard([
-      [Markup.button.callback('🎬 סרט', 'type_movie'), Markup.button.callback('📺 סדרה', 'type_series')]
-    ])
-  );
-});
-
-bot.action(/^type_(movie|series)$/, async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  await ctx.answerCbQuery();
-  const type = ctx.match[1];
-  ctx.session.itemType = type;
-  ctx.session.step = 'AWAIT_TITLE';
-
-  await ctx.replyWithHTML(`הגדרת סוג: <b>${type === 'movie' ? '🎬 סרט' : '📺 סדרה'}</b>\n\nכעת הזן את <b>שם הסרט/הסדרה</b>:`);
-});
-
-bot.hears('📁 העלאת מאגר (JSON)', async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  ctx.session = { step: 'AWAIT_JSON_FILE' };
-  await ctx.replyWithHTML(
-    `📥 <b>טעינת מאגר ידנית/אוטומטית באמצעות קובץ JSON</b>\n\n` +
-    `שלח כעת קובץ JSON המכיל את רשימת הסרטים/סדרות למאגר.`
+    `📊 <b>סטטיסטיקת מאגר מהיר</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `🎬 סרטים במאגר: <b>${movies}</b>\n` +
+    `📺 סדרות ייחודיות: <b>${uniqueSeries}</b>\n` +
+    `🧩 סה"כ פרקי סדרות: <b>${seriesEpisodes}</b>\n` +
+    `📦 סה"כ פריטים במאגר: <b>${total}</b>`
   );
 });
 
 bot.hears('📥 ייצוא מאגר (JSON)', async (ctx) => {
   if (!isAdmin(ctx)) return;
-  if (!fs.existsSync(DB_FILE) || db.movies.length === 0) {
-    return ctx.reply('המאגר ריק כרגע.');
-  }
-  await ctx.replyWithDocument({ source: DB_FILE, filename: 'movies_db.json' }, { caption: '📦 הנה קובץ המאגר המעודכן שלך.' });
+  if (db.items.length === 0) return ctx.reply('המאגר ריק כרגע.');
+  await ctx.replyWithDocument({ source: DB_FILE, filename: 'movies_db.json' }, { caption: '📦 קובץ המאגר המלא שלך.' });
 });
 
-bot.hears('📊 סטטיסטיקת מאגר', async (ctx) => {
+bot.hears('📁 העלאת מאגר (JSON)', async (ctx) => {
   if (!isAdmin(ctx)) return;
-  const total = db.movies.length;
-  const moviesCount = db.movies.filter(m => m.type === 'movie').length;
-  const seriesCount = db.movies.filter(m => m.type === 'series').length;
+  ctx.session = { step: 'AWAIT_JSON' };
+  await ctx.reply('שלח כעת קובץ JSON מעודכן להחלפה או מיזוג המאגר.');
+});
 
+bot.hears('🗑️ מחיקת כל המאגר', async (ctx) => {
+  if (!isAdmin(ctx)) return;
   await ctx.replyWithHTML(
-    `📊 <b>סטטיסטיקת מאגר הקולנוע</b>\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `🎬 סרטים במאגר: <b>${moviesCount}</b>\n` +
-    `📺 סדרות במאגר: <b>${seriesCount}</b>\n` +
-    `📦 סה"כ פריטים: <b>${total}</b>`
+    '⚠️ <b>האם אתה בטוח שברצונך למחוק את כל המאגר?</b>',
+    Markup.inlineKeyboard([[Markup.button.callback('❌ כן, מחק הכל!', 'confirm_delete_all')]])
   );
 });
 
+bot.action('confirm_delete_all', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await ctx.answerCbQuery();
+  db.items = [];
+  saveDB();
+  await ctx.reply('🗑️ המאגר נמחק כולו בהצלחה!');
+});
+
 // ==========================================
-// טיפול בשלבי ההזנה והעלאת קבצים
+// 1. קליטה מהירה במיוחד בשיטת העברה (Forwarding Bulk)
 // ==========================================
 
 bot.on('message', async (ctx, next) => {
-  // טיפול בהעלאת קובץ JSON לטעינת מאגר
-  if (ctx.message.document && ctx.session && ctx.session.step === 'AWAIT_JSON_FILE') {
+  // טיפול בהעלאת קובץ JSON
+  if (ctx.message.document && ctx.session && ctx.session.step === 'AWAIT_JSON') {
     if (!isAdmin(ctx)) return;
     try {
       const fileUrl = await ctx.telegram.getFileLink(ctx.message.document.file_id);
@@ -197,90 +226,24 @@ bot.on('message', async (ctx, next) => {
       const res = await fetch(fileUrl.href);
       const jsonContent = await res.json();
 
-      let itemsToAdd = [];
-      if (Array.isArray(jsonContent)) {
-        itemsToAdd = jsonContent;
-      } else if (jsonContent && Array.isArray(jsonContent.movies)) {
-        itemsToAdd = jsonContent.movies;
-      }
+      let itemsToAdd = Array.isArray(jsonContent) ? jsonContent : (jsonContent.items || jsonContent.movies || []);
 
-      if (itemsToAdd.length === 0) {
-        return ctx.reply('❌ הקובץ שנשלח אינו מכיל פורמט תקין של רשימת סרטים.');
-      }
+      if (itemsToAdd.length === 0) return ctx.reply('❌ קובץ JSON לא תקין או ריק.');
 
-      let addedCount = 0;
-      itemsToAdd.forEach(item => {
-        if (item.title) {
-          const newItem = {
-            id: item.id || 'm_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
-            title: item.title,
-            type: item.type || 'movie',
-            year_genre: item.year_genre || 'כללי',
-            description: item.description || 'אין תקציר זמין',
-            poster: item.poster || null,
-            file_id: item.file_id || null,
-            file_type: item.file_type || 'text',
-            content_text: item.content_text || null
-          };
-          db.movies.push(newItem);
-          addedCount++;
-        }
-      });
-
+      db.items.push(...itemsToAdd);
       saveDB();
-      resetSession(ctx);
-      return ctx.replyWithHTML(`✅ <b>המאגר עודכן בהצלחה!</b>\nנוספו <b>${addedCount}</b> פריטים חדשים.`, getAdminKeyboard());
-    } catch (err) {
-      console.error(err);
-      return ctx.reply('❌ שגיאה בקריאת קובץ ה-JSON. ודא שהקובץ תקין.');
+      ctx.session = {};
+      return ctx.reply(`✅ נטענו בהצלחה ${itemsToAdd.length} פריטים למאגר!`, getAdminKeyboard());
+    } catch (e) {
+      return ctx.reply('❌ שגיאה בטעינת קובץ ה-JSON.');
     }
   }
 
-  if (!isAdmin(ctx) || !ctx.session || !ctx.session.step) return next();
-
-  const step = ctx.session.step;
-
-  // קליטת שם
-  if (step === 'AWAIT_TITLE') {
-    ctx.session.title = ctx.message.text.trim();
-    ctx.session.step = 'AWAIT_YEAR_GENRE';
-    return ctx.replyWithHTML('מצויין! כעת הזן <b>שנה וז\'אנר</b> (לדוגמה: <code>2024 | אקשן, דרמה</code>):');
-  }
-
-  // קליטת שנה וז'אנר
-  if (step === 'AWAIT_YEAR_GENRE') {
-    ctx.session.year_genre = ctx.message.text.trim();
-    ctx.session.step = 'AWAIT_DESC';
-    return ctx.replyWithHTML('כעת הזן <b>תקציר / תיאור קצר</b> עבור התוכן:');
-  }
-
-  // קליטת תקציר
-  if (step === 'AWAIT_DESC') {
-    ctx.session.description = ctx.message.text.trim();
-    ctx.session.step = 'AWAIT_POSTER';
-
-    return ctx.replyWithHTML(
-      'שלח כעת <b>תמונה / פוסטר</b> עבור התוכן (או לחץ על הכפתור כדי לדלג):',
-      Markup.inlineKeyboard([[Markup.button.callback('⏩ דלג על תמונה', 'skip_poster')]])
-    );
-  }
-
-  // קליטת תמונה
-  if (step === 'AWAIT_POSTER') {
-    if (ctx.message.photo) {
-      ctx.session.poster = ctx.message.photo[ctx.message.photo.length - 1].file_id;
-    } else {
-      return ctx.reply('אנא שלח תמונה תקינה או לחץ על "דלג על תמונה".');
-    }
-    ctx.session.step = 'AWAIT_CONTENT';
-    return ctx.replyWithHTML('כעת שלח את **קובץ הסרט/הסדרה** (וידאו, קובץ, קישור, או הודעת טקסט):');
-  }
-
-  // קליטת תוכן הקובץ/וידאו/קישור
-  if (step === 'AWAIT_CONTENT') {
+  // אם ההודעה התקבלה מהמנהל - קליטה אוטומטית מיידית
+  if (isAdmin(ctx)) {
+    const text = ctx.message.caption || ctx.message.text || '';
     let fileId = null;
     let fileType = 'text';
-    let contentText = null;
 
     if (ctx.message.video) {
       fileType = 'video';
@@ -288,46 +251,43 @@ bot.on('message', async (ctx, next) => {
     } else if (ctx.message.document) {
       fileType = 'document';
       fileId = ctx.message.document.file_id;
-    } else if (ctx.message.text) {
-      fileType = 'text';
-      contentText = ctx.message.text.trim();
-    } else {
-      return ctx.reply('אנא שלח וידאו, קובץ או קישור בטקסט.');
+    } else if (ctx.message.photo) {
+      fileType = 'photo';
+      fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
     }
 
-    const newItem = {
-      id: 'm_' + Date.now(),
-      title: ctx.session.title,
-      type: ctx.session.itemType,
-      year_genre: ctx.session.year_genre,
-      description: ctx.session.description,
-      poster: ctx.session.poster || null,
-      file_id: fileId,
-      file_type: fileType,
-      content_text: contentText
-    };
+    if (fileId || text) {
+      const parsed = parseMediaDetails(text);
 
-    db.movies.push(newItem);
-    saveDB();
-    resetSession(ctx);
+      const newItem = {
+        id: 'i_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+        title: parsed.title,
+        cleanTitle: parsed.cleanTitle,
+        type: parsed.type,
+        season: parsed.season,
+        episode: parsed.episode,
+        file_id: fileId,
+        file_type: fileType,
+        caption: text,
+        createdAt: Date.now()
+      };
 
-    await ctx.replyWithHTML(`🎉 <b>התוכן "${newItem.title}" נשמר בהצלחה במאגר!</b>`, getAdminKeyboard());
-    return sendMovieCardToUser(ctx, newItem);
+      db.items.push(newItem);
+      saveDB();
+
+      let detailsStr = parsed.type === 'series' 
+        ? `📺 סדרה: <b>${parsed.cleanTitle}</b> | עונה ${parsed.season || 1} פרק ${parsed.episode || 1}`
+        : `🎬 סרט: <b>${parsed.cleanTitle}</b>`;
+
+      return ctx.replyWithHTML(`⚡ <b>נקלט בהצלחה!</b>\n${detailsStr}`, { disable_notification: true });
+    }
   }
 
   return next();
 });
 
-bot.action('skip_poster', async (ctx) => {
-  if (!isAdmin(ctx)) return;
-  await ctx.answerCbQuery();
-  ctx.session.poster = null;
-  ctx.session.step = 'AWAIT_CONTENT';
-  await ctx.replyWithHTML('דילגת על התמונה. כעת שלח את **קובץ הסרט/הסדרה** (וידאו, קובץ, קישור, או טקסט):');
-});
-
 // ==========================================
-// 2. מנוע חיפוש מתקדם בפרטי ובקבוצות
+// 2. מנוע חיפוש מתקדם ותמיכה בעונות/פרקים
 // ==========================================
 
 bot.on('message', async (ctx) => {
@@ -335,119 +295,162 @@ bot.on('message', async (ctx) => {
   if (!text || text.startsWith('/start')) return;
 
   const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+  let query = text.replace('/search', '').replace('/חיפוש', '').trim().toLowerCase();
 
-  // ניקוי מילת חיפוש
-  let query = text.replace('/search', '').replace('/חיפוש', '').trim();
+  if (!query || query.length < 2) return;
 
-  // אם בקבוצה ואין מילת פקודה, נבדוק אם חיפשו שם מהמאגר
-  if (isGroup && !text.startsWith('/search') && !text.startsWith('/חיפוש')) {
-    if (text.length < 2) return; // התעלם מהודעות קצרות מדי
-  }
-
-  const results = searchDatabase(query);
+  // חיפוש במאגר
+  const results = db.items.filter(i => 
+    i.cleanTitle.toLowerCase().includes(query) || 
+    i.title.toLowerCase().includes(query) ||
+    i.caption.toLowerCase().includes(query)
+  );
 
   if (results.length === 0) {
-    if (!isGroup) {
-      return ctx.replyWithHTML(`❌ לא נמצאו תוצאות עבור <b>"${query}"</b> במאגר.`);
-    }
+    if (!isGroup) await ctx.replyWithHTML(`❌ לא נמצאו תוצאות עבור <b>"${query}"</b>.`);
     return;
   }
 
-  // מענה ממותג ומעוצב
-  if (isGroup) {
-    // בקבוצה שולחים כרטיס עם כפתור פנייה בפרטי לקבלת הסרט (כדי לא לאמוס על הקבוצה)
-    for (const item of results.slice(0, 3)) {
-      const caption = formatMovieCardHTML(item);
-      const deepLink = `https://t.me/${botUsername}?start=get_${item.id}`;
-      const keyboard = Markup.inlineKeyboard([[Markup.button.url('🎬 קבלת הקובץ בפרטי 🍿', deepLink)]]);
-
-      if (item.poster) {
-        await ctx.replyWithPhoto(item.poster, { caption, parse_mode: 'HTML', ...keyboard });
-      } else {
-        await ctx.replyWithHTML(caption, keyboard);
-      }
-    }
-  } else {
-    // בפרטי שולחים ישירות
-    for (const item of results.slice(0, 5)) {
-      await sendMovieCardToUser(ctx, item);
-    }
-  }
-});
-
-// חיפוש במאגר לפי שם, ז'אנר או תקציר
-function searchDatabase(query) {
-  if (!query) return [];
-  const q = query.toLowerCase();
-  return db.movies.filter(m => 
-    m.title.toLowerCase().includes(q) || 
-    (m.year_genre && m.year_genre.toLowerCase().includes(q)) ||
-    (m.description && m.description.toLowerCase().includes(q))
-  );
-}
-
-// עיצוב מותג לקולנוע
-function formatMovieCardHTML(item) {
-  return (
-    `🍿 <b>CINEMA STREAM | ${item.type === 'series' ? '📺 סדרה' : '🎬 סרט'}</b>\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━\n` +
-    `📌 <b>שם:</b> ${item.title}\n` +
-    `📅 <b>פרטים:</b> ${item.year_genre}\n` +
-    `📝 <b>תקציר:</b> ${item.description}\n` +
-    `━━━━━━━━━━━━━━━━━━━━━━`
-  );
-}
-
-// שליחת הכרטיס והקובץ למשתמש
-async function sendMovieCardToUser(ctx, item) {
-  const caption = formatMovieCardHTML(item);
-
-  if (item.poster) {
-    await ctx.replyWithPhoto(item.poster, { caption, parse_mode: 'HTML' });
-  } else {
-    await ctx.replyWithHTML(caption);
-  }
-
-  // שליחת התוכן בפועל (וידאו, קובץ או קישור)
-  if (item.file_type === 'video' && item.file_id) {
-    return ctx.replyWithVideo(item.file_id, { caption: `🍿 צפייה מהנה ב-${item.title}!` });
-  } else if (item.file_type === 'document' && item.file_id) {
-    return ctx.replyWithDocument(item.file_id, { caption: `🍿 ההורדה של ${item.title} מוכנה!` });
-  } else if (item.content_text) {
-    return ctx.replyWithHTML(`🔗 <b>קישור לצפייה/הורדה:</b>\n${item.content_text}`);
-  }
-}
-
-// ==========================================
-// 3. תמיכה בחיפוש אינליין (Inline Search) בכל צ'אט
-// ==========================================
-
-bot.on('inline_query', async (ctx) => {
-  const query = ctx.inlineQuery.query.trim();
-  if (!query) return ctx.answerInlineQuery([]);
-
-  const results = searchDatabase(query);
-
-  const inlineResults = results.slice(0, 10).map((item) => {
-    const deepLink = `https://t.me/${botUsername}?start=get_${item.id}`;
-    return {
-      type: 'article',
-      id: item.id,
-      title: `${item.type === 'series' ? '📺' : '🎬'} ${item.title}`,
-      description: `${item.year_genre} | ${item.description}`,
-      input_message_content: {
-        message_text: formatMovieCardHTML(item),
-        parse_mode: 'HTML'
-      },
-      reply_markup: Markup.inlineKeyboard([[Markup.button.url('🎬 לחץ לקבלת הקובץ 🍿', deepLink)]]).reply_markup
-    };
+  // מקבצים את התוצאות לפי שם סדרה/סרט
+  const grouped = {};
+  results.forEach(item => {
+    const key = item.cleanTitle;
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(item);
   });
 
-  return ctx.answerInlineQuery(inlineResults);
+  const groupKeys = Object.keys(grouped);
+
+  for (const cleanTitle of groupKeys.slice(0, 5)) {
+    const items = grouped[cleanTitle];
+    const first = items[0];
+
+    if (first.type === 'series') {
+      // אם זו סדרה - מציגים תפריט עונות ופרקים
+      if (isGroup) {
+        const deepLink = `https://t.me/${botUsername}?start=series_${encodeURIComponent(cleanTitle)}`;
+        await ctx.replyWithHTML(
+          `🍿 <b>CINEMA STREAM | 📺 סדרה: ${cleanTitle}</b>\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `קיימים <b>${items.length}</b> פרקים במאגר.\n` +
+          `לחץ למטה לצפייה בעונות ובפרקים בפרטי:`,
+          Markup.inlineKeyboard([[Markup.button.url('📺 פתח רשימת עונות ופרקים 🍿', deepLink)]])
+        );
+      } else {
+        await showSeriesMenu(ctx, cleanTitle);
+      }
+    } else {
+      // אם זה סרט
+      if (isGroup) {
+        const deepLink = `https://t.me/${botUsername}?start=get_${first.id}`;
+        await ctx.replyWithHTML(
+          `🍿 <b>CINEMA STREAM | 🎬 סרט: ${first.cleanTitle}</b>\n` +
+          `━━━━━━━━━━━━━━━━━━━━━━\n` +
+          `לחץ למטה לקבלת הקובץ בפרטי:`,
+          Markup.inlineKeyboard([[Markup.button.url('🎬 קבלת הסרט בפרטי 🍿', deepLink)]])
+        );
+      } else {
+        await sendItemToUser(ctx, first);
+      }
+    }
+  }
 });
 
+// הצגת תפריט סדרה (עונות ופרקים)
+async function showSeriesMenu(ctx, cleanTitle) {
+  const episodes = db.items.filter(i => i.cleanTitle.toLowerCase() === cleanTitle.toLowerCase() && i.type === 'series');
+
+  if (episodes.length === 0) return ctx.reply('❌ לא נמצאו פרקים עבור סדרה זו.');
+
+  // איסוף כל העונות הקיימות
+  const seasonsSet = new Set(episodes.map(e => e.season || 1));
+  const seasons = Array.from(seasonsSet).sort((a, b) => a - b);
+
+  let buttons = [];
+
+  if (seasons.length === 1) {
+    // אם יש רק עונה אחת - מציגים ישירות את הפרקים
+    return showSeasonEpisodes(ctx, cleanTitle, seasons[0]);
+  }
+
+  // יצירת כפתורים לפי עונות
+  seasons.forEach(s => {
+    const count = episodes.filter(e => (e.season || 1) === s).length;
+    buttons.push([Markup.button.callback(`📺 עונה ${s} (${count} פרקים)`, `sn_${encodeURIComponent(cleanTitle)}_${s}`)]);
+  });
+
+  await ctx.replyWithHTML(
+    `🍿 <b>CINEMA STREAM | 📺 ${cleanTitle}</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `בחר עונה לצפייה:`,
+    Markup.inlineKeyboard(buttons)
+  );
+}
+
+// הצגת פרקים של עונה ספציפית
+bot.action(/^sn_(.+)_(\d+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const cleanTitle = decodeURIComponent(ctx.match[1]);
+  const season = parseInt(ctx.match[2], 10);
+  await showSeasonEpisodes(ctx, cleanTitle, season);
+});
+
+async function showSeasonEpisodes(ctx, cleanTitle, season) {
+  const episodes = db.items
+    .filter(i => i.cleanTitle.toLowerCase() === cleanTitle.toLowerCase() && (i.season || 1) === season)
+    .sort((a, b) => (a.episode || 0) - (b.episode || 0));
+
+  let buttons = [];
+  let row = [];
+
+  episodes.forEach((ep) => {
+    const epNum = ep.episode ? `פרק ${ep.episode}` : 'פרק';
+    row.push(Markup.button.callback(`▶️ ${epNum}`, `getep_${ep.id}`));
+    if (row.length === 2) {
+      buttons.push(row);
+      row = [];
+    }
+  });
+  if (row.length > 0) buttons.push(row);
+
+  const text = `🍿 <b>${cleanTitle} | עונה ${season}</b>\nבחר פרק לצפייה והורדה:`;
+
+  if (ctx.callbackQuery) {
+    await ctx.editMessageText(text, { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) });
+  } else {
+    await ctx.replyWithHTML(text, Markup.inlineKeyboard(buttons));
+  }
+}
+
+// שליחת פרק בודד מתוך בלוק
+bot.action(/^getep_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery();
+  const itemId = ctx.match[1];
+  const item = db.items.find(i => i.id === itemId);
+  if (item) await sendItemToUser(ctx, item);
+});
+
+// פונקציית שליחת קובץ למשתמש
+async function sendItemToUser(ctx, item) {
+  const titleStr = item.type === 'series' 
+    ? `📺 <b>${item.cleanTitle}</b> | עונה ${item.season || 1} פרק ${item.episode || 1}`
+    : `🎬 <b>${item.cleanTitle}</b>`;
+
+  const caption = `🍿 <b>CINEMA STREAM</b>\n━━━━━━━━━━━━━━━━━━━━━━\n📌 ${titleStr}\n━━━━━━━━━━━━━━━━━━━━━━`;
+
+  if (item.file_type === 'video' && item.file_id) {
+    return ctx.replyWithVideo(item.file_id, { caption, parse_mode: 'HTML' });
+  } else if (item.file_type === 'document' && item.file_id) {
+    return ctx.replyWithDocument(item.file_id, { caption, parse_mode: 'HTML' });
+  } else if (item.file_type === 'photo' && item.file_id) {
+    return ctx.replyWithPhoto(item.file_id, { caption, parse_mode: 'HTML' });
+  } else {
+    return ctx.replyWithHTML(`${caption}\n\n🔗 ${item.caption}`);
+  }
+}
+
 // הפעלת הבוט
-bot.launch().then(() => console.log('🚀 Cinema Bot is fully running!'));
+bot.launch().then(() => console.log('🚀 Ultra-Fast Cinema Bot running!'));
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
