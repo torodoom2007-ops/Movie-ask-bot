@@ -1,7 +1,7 @@
 {
-  "name": "cinema-movies-series-bot",
-  "version": "1.0.0",
-  "description": "Professional Telegram Movie & Series Bot with Group Search, Automated DB Management and Premium Cinema Design",
+  "name": "cinema-ultra-bulk-bot",
+  "version": "2.0.0",
+  "description": "Ultra-Fast Telegram Cinema Bot with Bulk Forwarding, Automatic Parsing, and Season/Episode Management",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
