@@ -5,7 +5,7 @@
  *
  * משתני סביבה:
  *   BOT_TOKEN            (חובה)
- *   ADMIN_IDS            מזהי מנהלים מופרדים בפסיק (ברירת מחדל: 8017590244)
+ *   ADMIN_IDS            מזהי מנהלים מופרדים בפסיק (ברירת מחדל: 8914147572)
  *   DATA_DIR             תיקייה לשמירת המאגר (מומלץ Persistent Disk ב-Render, למשל /data)
  *   BRAND                שם המותג בכיתובים (ברירת מחדל: CINEMA STREAM)
  *   RENDER_EXTERNAL_URL  (Render מגדיר לבד) - לשמירת השרת ער
@@ -25,7 +25,7 @@ if (!BOT_TOKEN) {
   console.error('❌ חסר BOT_TOKEN במשתני הסביבה!');
   process.exit(1);
 }
-const ADMIN_IDS = (process.env.ADMIN_IDS || '8017590244')
+const ADMIN_IDS = (process.env.ADMIN_IDS || '8914147572')
   .split(',').map((s) => Number(s.trim())).filter(Boolean);
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const BRAND = process.env.BRAND || 'CINEMA STREAM';
