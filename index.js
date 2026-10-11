@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 🍿 Cinema Stream Bot v4
+ * 🍿 Cinema Stream Bot v5
  * דרישות: Node 18+ ,  npm i telegraf@4 express
  *
  * משתני סביבה (הכול אופציונלי חוץ מ-BOT_TOKEN):
@@ -43,9 +43,12 @@ const BACKUP_DELAY = 2 * 60 * 1000;
 const PREMIUM = process.env.PREMIUM_EMOJI !== '0';
 
 // הגדרות שמנהל משנה מתוך הבוט (⚙️ הגדרות)
-const DEFAULT_SETTINGS = { delSec: 60, grpSec: 30, protect: false };
+// delSec: מחיקת הקבצים שנשלחו למשתמש (0 = כבוי)
+// grpSec: מחיקת הודעת "נמצאו תוצאות" בקבוצה + הודעת המשתמש (0 = כבוי). תוצאות החיפוש עצמן לא נמחקות לעולם.
+const SETTINGS_VER = 5;
+const DEFAULT_SETTINGS = { v: SETTINGS_VER, delSec: 0, grpSec: 20, protect: false };
 const DEL_OPTS = [0, 30, 60, 120, 300, 600];
-const GRP_OPTS = [0, 15, 30, 60, 120];
+const GRP_OPTS = [0, 10, 20, 30, 60];
 
 // ==========================================
 // אימוג'ים פרימיום
@@ -266,11 +269,14 @@ function readJsonFile(file) {
   const rawItems = isObj ? j.items || j.movies || [] : j;
   const bl = isObj && Array.isArray(j.blacklist) ? j.blacklist.filter((x) => typeof x === 'string') : [];
   db.blacklist = bl; rebuildBL();
+  const settings = { ...DEFAULT_SETTINGS, ...(isObj && j.settings && typeof j.settings === 'object' ? j.settings : {}) };
+  // מעבר לגרסה 5: מחיקת קבצים כבויה כברירת מחדל, ותוצאות חיפוש אף פעם לא נמחקות
+  if (settings.v !== SETTINGS_VER) { settings.v = SETTINGS_VER; settings.delSec = 0; settings.grpSec = 20; }
   return {
     items: rawItems.map(prepareItem).filter(Boolean),
     users: isObj && j.users && typeof j.users === 'object' ? j.users : {},
     blacklist: bl,
-    settings: { ...DEFAULT_SETTINGS, ...(isObj && j.settings && typeof j.settings === 'object' ? j.settings : {}) },
+    settings,
     pending: isObj && Array.isArray(j.pending) ? j.pending.filter((p) => p && p.c && p.m && p.at) : []
   };
 }
@@ -282,6 +288,8 @@ function loadDB() {
       db = readJsonFile(f);
       rebuildBL();
       rebuildSeen();
+      // ביטול מחיקות ממתינות ישנות (מגרסה קודמת) - הן עלולות למחוק תוצאות חיפוש
+      db.pending = [];
       log(`📚 נטענו ${db.items.length} פריטים מ-${path.basename(f)}`);
       return;
     } catch (e) {
@@ -293,7 +301,7 @@ function loadDB() {
 
 const serialize = () =>
   JSON.stringify(
-    { version: 4, items: db.items, users: db.users, blacklist: db.blacklist, settings: db.settings, pending: db.pending },
+    { version: 5, items: db.items, users: db.users, blacklist: db.blacklist, settings: db.settings, pending: db.pending },
     (k, v) => (k.startsWith('_') ? undefined : v)
   );
 
@@ -339,7 +347,9 @@ async function sendBackup(silent) {
 loadDB();
 
 // ==========================================
-// מחיקה אוטומטית של הודעות (שורדת הפעלה מחדש)
+// מחיקה אוטומטית של הודעות זמניות בלבד (שורדת הפעלה מחדש)
+// משמש רק ל: הודעת "נמצאו תוצאות" בקבוצה, הודעת המשתמש שחיפש, וקבצים (אם הופעל בהגדרות)
+// תוצאות חיפוש, רשימות עונות ופרקים - לעולם לא נמחקים
 // ==========================================
 function scheduleDelete(chatId, msgId, sec) {
   if (!chatId || !msgId || !sec) return;
@@ -365,7 +375,7 @@ async function sweep() {
 }
 setInterval(() => sweep().catch(() => {}), 3000).unref();
 
-/** אחרי שליחת קובץ למשתמש: תזמון מחיקה + הודעת ספירה לאחור שנערכת */
+/** אחרי שליחת קובץ למשתמש (רק אם מחיקת קבצים מופעלת בהגדרות) */
 async function autoClean(ctx, sent) {
   const sec = db.settings.delSec;
   if (!sec || !sent) return;
@@ -751,7 +761,7 @@ async function sendItem(ctx, item) {
   if (!admin && sent) {
     item.views = (item.views || 0) + 1;
     markDirty(true);
-    await autoClean(ctx, sent);
+    await autoClean(ctx, sent); // פעיל רק אם הופעל בהגדרות
   }
   return sent;
 }
@@ -962,20 +972,20 @@ bot.command('reparse', async (ctx) => {
 });
 
 // ==========================================
-// הגדרות (מחיקה אוטומטית וכו')
+// הגדרות
 // ==========================================
 function setView() {
   const s = db.settings;
   const text =
     `⚙️ <b>הגדרות</b>\n${HR}\n` +
-    `⏱ <b>מחיקת קבצים מהמשתמשים:</b> ${fmtSec(s.delSec)}\n` +
-    `👥 <b>מחיקת תוצאות בקבוצות:</b> ${fmtSec(s.grpSec)}\n` +
+    `👥 <b>מחיקת הודעת "נמצאו תוצאות" בקבוצות:</b> ${fmtSec(s.grpSec)}\n` +
+    `<i>נמחקת רק הודעת התגובה והודעת המשתמש שחיפש. תוצאות החיפוש, העונות והפרקים נשארים תמיד.</i>\n\n` +
+    `⏱ <b>מחיקת קבצים שנשלחו למשתמש:</b> ${fmtSec(s.delSec)}\n` +
     `🔒 <b>חסימת העברה/שמירה:</b> ${s.protect ? 'פעיל' : 'כבוי'}\n\n` +
-    `💡 מנהלים פטורים ממחיקה. בקבוצות הבוט חייב להיות מנהל עם הרשאת מחיקת הודעות.\n` +
-    `לחצו על כפתור כדי להחליף ערך.`;
+    `💡 מנהלים פטורים ממחיקה. בקבוצות הבוט חייב להיות מנהל עם הרשאת מחיקת הודעות.`;
   const kb = Markup.inlineKeyboard([
+    [Markup.button.callback(`👥 מחיקת "נמצאו" בקבוצות: ${fmtSec(s.grpSec)}`, 'st_grp')],
     [Markup.button.callback(`⏱ מחיקת קבצים: ${fmtSec(s.delSec)}`, 'st_del')],
-    [Markup.button.callback(`👥 מחיקה בקבוצות: ${fmtSec(s.grpSec)}`, 'st_grp')],
     [Markup.button.callback(`🔒 הגנה מהעברה: ${s.protect ? 'פעיל' : 'כבוי'}`, 'st_prot')]
   ]);
   return { text, kb };
@@ -1344,15 +1354,18 @@ async function handleSearch(ctx, text) {
   cooldown.set(ctx.from.id, now);
   if (cooldown.size > 5000) cooldown.clear();
 
-  // בקבוצות: הודעות הבוט נמחקות אחרי זמן שהוגדר
-  const gsend = async (html, kb) => {
-    const s = await ctx.replyWithHTML(html, kb);
-    if (db.settings.grpSec) {
-      scheduleDelete(ctx.chat.id, s.message_id, db.settings.grpSec);
-      if (explicit) scheduleDelete(ctx.chat.id, ctx.message.message_id, db.settings.grpSec);
+  // בקבוצות: הודעת תגובה זמנית ("נמצאו תוצאות") + הודעת המשתמש נמחקות. התוצאות עצמן נשארות.
+  const tempNote = async (html) => {
+    const sec = db.settings.grpSec;
+    const s = await ctx.reply(html, { parse_mode: 'HTML', disable_web_page_preview: true }).catch(() => null);
+    if (sec) {
+      if (s) scheduleDelete(ctx.chat.id, s.message_id, sec);
+      scheduleDelete(ctx.chat.id, ctx.message.message_id, sec);
     }
     return s;
   };
+  // תוצאות בקבוצה - קבועות, לא נמחקות לעולם
+  const groupResults = (html, kb) => ctx.replyWithHTML(html, kb);
 
   // בפרטי: הודעת "מחפש..." שנערכת לתוצאה
   if (!isGroup) {
@@ -1368,7 +1381,7 @@ async function handleSearch(ctx, text) {
     const groups = searchDB(titleQ.length >= 2 ? titleQ : q);
     if (!groups.length) {
       if (isGroup) {
-        if (explicit) await gsend(`❌ לא נמצאו תוצאות עבור <b>"${esc(q)}"</b>.`);
+        if (explicit) await tempNote(`❌ לא נמצאו תוצאות עבור <b>"${esc(q)}"</b>.`);
         return;
       }
       const rid = newReq(q, ctx.from);
@@ -1383,9 +1396,11 @@ async function handleSearch(ctx, text) {
     const clearWinner = hasSE && cand.length && (cand.length === 1 || cand[0].score > cand[1].score + 0.3);
 
     if (isGroup) {
+      const who = esc(ctx.from.first_name || 'משתמש');
       if (clearWinner) {
         const label = `▶️ ${cut(cand[0].title, 30)} ע${se.season ?? 1}${se.episode != null ? ` פ${se.episode}` : ''}`;
-        return gsend(
+        await tempNote(`🔎 ${who}, מצאתי את מה שחיפשת 👇`);
+        return groupResults(
           `${header()}\n✨ מצאתי! לחצו לפתיחה בפרטי:`,
           Markup.inlineKeyboard([[Markup.button.url(
             label, `https://t.me/${botUsername}?start=e_${cand[0].id}_${se.season ?? 1}_${se.episode ?? 0}`
@@ -1396,7 +1411,8 @@ async function handleSearch(ctx, text) {
         groupLabel(g),
         `https://t.me/${botUsername}?start=${g.type === 'series' ? 's_' : 'g_'}${g.id}`
       )]);
-      return gsend(
+      await tempNote(`🔎 ${who}, נמצאו <b>${groups.length}</b> תוצאות עבור "<b>${esc(cut(q, 40))}</b>" 👇`);
+      return groupResults(
         `${header()}\nנמצאו <b>${groups.length}</b> תוצאות. לחצו לפתיחה בפרטי:`,
         Markup.inlineKeyboard(rows)
       );
