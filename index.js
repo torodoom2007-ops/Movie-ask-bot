@@ -1,6 +1,6 @@
 'use strict';
 /**
- * 🍿 Cinema Stream Bot v5
+ * 🍿 Cinema Stream Bot v6
  * דרישות: Node 18+ ,  npm i telegraf@4 express
  *
  * משתני סביבה (הכול אופציונלי חוץ מ-BOT_TOKEN):
@@ -37,12 +37,12 @@ const CHANNEL_URL = process.env.CHANNEL_URL || 'https://t.me/ask_movie_MT';
 const CHANNEL_USER = '@' + CHANNEL_URL.replace(/\/+$/, '').split('/').pop();
 const FORCE_SUB = process.env.FORCE_SUB === '1';
 const PORT = process.env.PORT || 3000;
-const PAGE_SIZE = 8;
+const PAGE_SIZE = 8;     // תוצאות בעמוד (פרטי)
+const GROUP_PAGE = 5;    // תוצאות בעמוד (קבוצה)
 const EP_PAGE = 30;
 const BACKUP_DELAY = 2 * 60 * 1000;
 const PREMIUM = process.env.PREMIUM_EMOJI !== '0';
 
-// הגדרות שמנהל משנה מתוך הבוט (⚙️ הגדרות)
 // delSec: מחיקת הקבצים שנשלחו למשתמש (0 = כבוי)
 // grpSec: מחיקת הודעת "נמצאו תוצאות" בקבוצה + הודעת המשתמש (0 = כבוי). תוצאות החיפוש עצמן לא נמחקות לעולם.
 const SETTINGS_VER = 5;
@@ -126,6 +126,56 @@ function lev(a, b) {
     prev = cur;
   }
   return prev[n];
+}
+
+// ==========================================
+// אוצר מילים: ניסוחי בקשה שמתעלמים מהם בחיפוש
+// ("אפשר את", "יש את", "אפשר בבקשה", "חפש", "חיפוש" וכו')
+// מסירים רק מתחילת/סוף הטקסט, כך ששמות כמו "לשבור את הקרח" לא נפגעים
+// ==========================================
+const mkSet = (list) => new Set(list.map(norm).filter(Boolean));
+
+const FILLER = mkSet([
+  'אפשר', 'אפשרי', 'בבקשה', 'בקשה', 'תודה', 'רבה', 'יש', 'לכם', 'לך', 'לי', 'לנו', 'אלי', 'את', 'אתם', 'אתן',
+  'האם', 'חפש', 'תחפש', 'תחפשו', 'חפשו', 'חפשי', 'תחפשי', 'חיפוש', 'לחפש', 'מחפש', 'מחפשת', 'מחפשים',
+  'מצא', 'תמצא', 'תמצאו', 'תמצאי', 'למצוא', 'תביא', 'תביאו', 'הבא', 'תשלח', 'תשלחו', 'שלח', 'שלחו',
+  'תן', 'תני', 'תנו', 'רוצה', 'רוצים', 'רציתי', 'צריך', 'צריכה', 'צריכים', 'אני', 'אנחנו',
+  'מעוניין', 'מעוניינת', 'היי', 'הי', 'שלום', 'אהלן', 'הלו', 'בוט', 'אחי', 'אח', 'סליחה',
+  'עם', 'בשם', 'שנקרא', 'שקוראים', 'הסרט', 'הסדרה', 'סרט', 'סדרה', 'סרטים', 'סדרות',
+  'תוכל', 'תוכלו', 'תוכלי', 'יכול', 'יכולים', 'אולי', 'בא', 'לראות', 'לצפות', 'צפייה', 'הורדה', 'להוריד',
+  'קישור', 'לינק', 'לקבל', 'תקבל', 'קיים', 'קיימת', 'מישהו', 'מה', 'איך', 'איפה', 'זה', 'הזה', 'הזאת', 'של',
+  'עזרה', 'הוראות',
+  'search', 'find', 'get', 'send', 'give', 'me', 'the', 'movie', 'series', 'show', 'can', 'you', 'please',
+  'plz', 'pls', 'want', 'looking', 'for', 'is', 'there', 'do', 'have', 'any', 'hey', 'hi', 'hello',
+  'thanks', 'thank', 'a', 'i', 'to', 'watch', 'download', 'link', 'help'
+]);
+const TRAIL = mkSet([
+  'בבקשה', 'בקשה', 'תודה', 'רבה', 'לי', 'לכם', 'לנו', 'אחי', 'אח', 'please', 'plz', 'pls', 'thanks', 'thank', 'you'
+]);
+// מילה אחת מספיקה כדי להבין שהמשתמש ניסה לחפש ושכח את השם
+const STRONG = mkSet([
+  'חפש', 'תחפש', 'תחפשו', 'חפשו', 'חפשי', 'תחפשי', 'חיפוש', 'לחפש', 'עזרה', 'הוראות', 'help', 'search', 'find'
+]);
+// מילים שבצירוף של שתיים ומעלה מעידות על בקשה לא גמורה ("אפשר בבקשה", "יש את")
+const INTENT = mkSet([
+  'אפשר', 'אפשרי', 'בבקשה', 'בקשה', 'יש', 'האם', 'לכם', 'מחפש', 'מחפשת', 'מחפשים', 'תמצא', 'מצא',
+  'תביא', 'תשלח', 'שלח', 'רוצה', 'צריך', 'תן', 'איך', 'איפה'
+]);
+
+/** מסיר ניסוחי בקשה. empty=true אם נשארו רק מילות בקשה (אין שם לחפש) */
+function cleanQuery(q) {
+  const toks = String(q || '').split(/\s+/).filter(Boolean);
+  const nt = toks.map(norm);
+  let s = 0, e = toks.length;
+  while (s < e && (nt[s] === '' || FILLER.has(nt[s]))) s++;
+  if (s >= e) {
+    const m = nt.filter(Boolean);
+    const trigger = m.length <= 6 &&
+      (m.some((t) => STRONG.has(t)) || (m.length >= 2 && m.some((t) => INTENT.has(t))));
+    return { empty: true, trigger, q: '' };
+  }
+  while (e > s && (nt[e - 1] === '' || TRAIL.has(nt[e - 1]))) e--;
+  return { empty: false, trigger: false, q: toks.slice(s, e).join(' ') };
 }
 
 // ==========================================
@@ -270,7 +320,6 @@ function readJsonFile(file) {
   const bl = isObj && Array.isArray(j.blacklist) ? j.blacklist.filter((x) => typeof x === 'string') : [];
   db.blacklist = bl; rebuildBL();
   const settings = { ...DEFAULT_SETTINGS, ...(isObj && j.settings && typeof j.settings === 'object' ? j.settings : {}) };
-  // מעבר לגרסה 5: מחיקת קבצים כבויה כברירת מחדל, ותוצאות חיפוש אף פעם לא נמחקות
   if (settings.v !== SETTINGS_VER) { settings.v = SETTINGS_VER; settings.delSec = 0; settings.grpSec = 20; }
   return {
     items: rawItems.map(prepareItem).filter(Boolean),
@@ -288,7 +337,6 @@ function loadDB() {
       db = readJsonFile(f);
       rebuildBL();
       rebuildSeen();
-      // ביטול מחיקות ממתינות ישנות (מגרסה קודמת) - הן עלולות למחוק תוצאות חיפוש
       db.pending = [];
       log(`📚 נטענו ${db.items.length} פריטים מ-${path.basename(f)}`);
       return;
@@ -301,7 +349,7 @@ function loadDB() {
 
 const serialize = () =>
   JSON.stringify(
-    { version: 5, items: db.items, users: db.users, blacklist: db.blacklist, settings: db.settings, pending: db.pending },
+    { version: 6, items: db.items, users: db.users, blacklist: db.blacklist, settings: db.settings, pending: db.pending },
     (k, v) => (k.startsWith('_') ? undefined : v)
   );
 
@@ -348,7 +396,6 @@ loadDB();
 
 // ==========================================
 // מחיקה אוטומטית של הודעות זמניות בלבד (שורדת הפעלה מחדש)
-// משמש רק ל: הודעת "נמצאו תוצאות" בקבוצה, הודעת המשתמש שחיפש, וקבצים (אם הופעל בהגדרות)
 // תוצאות חיפוש, רשימות עונות ופרקים - לעולם לא נמחקים
 // ==========================================
 function scheduleDelete(chatId, msgId, sec) {
@@ -507,7 +554,7 @@ function searchDB(q) {
 const groupKey = (it) => (it.type === 'series' ? 's:' + it._sid : 'm:' + it.id);
 const seriesCount = (sid) => db.items.filter((x) => x._sid === sid).length;
 
-function latestGroups(limit = 24) {
+function latestGroups(limit = 48) {
   const sorted = [...db.items].sort((a, b) => b.createdAt - a.createdAt);
   const keys = new Set(), out = [];
   for (const it of sorted) {
@@ -523,7 +570,7 @@ function latestGroups(limit = 24) {
   return out;
 }
 
-function topGroups(limit = 24) {
+function topGroups(limit = 48) {
   const m = new Map();
   for (const it of db.items) {
     if (!(it.views > 0)) continue;
@@ -540,12 +587,37 @@ function topGroups(limit = 24) {
   return out;
 }
 
+// ==========================================
+// מטמון תוצאות חיפוש (לדפדוף) + שחזור אחרי הפעלה מחדש
+// ==========================================
+const NEW_TITLE = '🆕 <b>התוספות האחרונות</b>';
+const TOP_TITLE = '🔥 <b>הכי נצפים</b>';
 const queries = new Map();
+
 function saveQuery(q, groups, title) {
   const id = crypto.randomBytes(4).toString('hex');
-  queries.set(id, { q, groups, title });
-  if (queries.size > 500) queries.delete(queries.keys().next().value);
+  queries.set(id, { q: String(q).replace(/["״]/g, ''), groups, title, f: 'a' });
+  if (queries.size > 2000) queries.delete(queries.keys().next().value);
   return id;
+}
+
+/** אם הבוט הופעל מחדש והחיפוש נעלם מהזיכרון - משחזרים אותו מהטקסט של ההודעה */
+function recoverQuery(qid, text = '') {
+  let groups = null, q = '', title;
+  if (/התוספות האחרונות/.test(text)) { groups = latestGroups(); q = 'new'; title = NEW_TITLE; }
+  else if (/הכי נצפים/.test(text)) { groups = topGroups(); q = 'top'; title = TOP_TITLE; }
+  else {
+    const m = text.match(/עבור "(.+?)"/);
+    if (m) { q = m[1]; groups = searchDB(q); }
+  }
+  if (!groups || !groups.length) return false;
+  queries.set(qid, { q, groups, title, f: 'a' });
+  return true;
+}
+
+function ensureQuery(ctx, qid) {
+  if (queries.has(qid)) return true;
+  return recoverQuery(qid, ctx.callbackQuery?.message?.text || '');
 }
 
 const requests = new Map();
@@ -560,7 +632,6 @@ function newReq(q, user) {
 // ==========================================
 // עזרי תצוגה (עריכת הודעות)
 // ==========================================
-/** אם יש הודעת "מחפש..." פעילה - עורכים אותה לתוצאה; אם זו לחיצה על כפתור - עורכים את ההודעה */
 async function render(ctx, text, kb) {
   const extra = { parse_mode: 'HTML', disable_web_page_preview: true, ...(kb || {}) };
   const t = ctx.state && ctx.state.target;
@@ -590,26 +661,62 @@ const HR = '━━━━━━━━━━━━━━━━━━━━━━';
 const header = () => `${pe('brand')} <a href="${CHANNEL_URL}"><b>${esc(BRAND)}</b></a>\n${HR}`;
 const groupLabel = (g) => cut(g.type === 'series' ? `📺 ${g.title} (${g.count} פרקים)` : `🎬 ${g.title}`, 60);
 
-async function renderResults(ctx, qid, page) {
-  const { q, groups, title } = queries.get(qid);
-  const pages = Math.ceil(groups.length / PAGE_SIZE);
+/**
+ * תצוגת תוצאות עם דפדוף. mode: 'p' = פרטי (לחיצה שולחת), 'g' = קבוצה (כפתורי קישור לפרטי)
+ * כולל: ⏮ ⬅️ עמוד ➡️ ⏭, סינון סרטים/סדרות, וכפתור "כל התוצאות בפרטי" בקבוצה
+ */
+function resultsView(qid, page, mode) {
+  const e = queries.get(qid);
+  const all = e.f === 'm' ? e.groups.filter((g) => g.type === 'movie')
+    : e.f === 's' ? e.groups.filter((g) => g.type === 'series') : e.groups;
+  const size = mode === 'g' ? GROUP_PAGE : PAGE_SIZE;
+  const pages = Math.max(1, Math.ceil(all.length / size));
   page = Math.max(0, Math.min(page, pages - 1));
-  const slice = groups.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  const slice = all.slice(page * size, (page + 1) * size);
+  const pre = mode === 'g' ? 'gp' : 'pg';
 
-  const rows = slice.map((g) => [
-    Markup.button.callback(groupLabel(g), g.type === 'series' ? `sr_${g.id}` : `mv_${g.id}`)
-  ]);
+  const rows = slice.map((g) => [mode === 'g'
+    ? Markup.button.url(groupLabel(g), `https://t.me/${botUsername}?start=${g.type === 'series' ? 's_' : 'g_'}${g.id}`)
+    : Markup.button.callback(groupLabel(g), g.type === 'series' ? `sr_${g.id}` : `mv_${g.id}`)]);
+
   if (pages > 1) {
     const nav = [];
-    if (page > 0) nav.push(Markup.button.callback('⬅️ הקודם', `pg_${qid}_${page - 1}`));
+    if (pages >= 4 && page > 1) nav.push(Markup.button.callback('⏮', `${pre}_${qid}_0`));
+    if (page > 0) nav.push(Markup.button.callback('⬅️', `${pre}_${qid}_${page - 1}`));
     nav.push(Markup.button.callback(`${page + 1}/${pages}`, 'noop'));
-    if (page < pages - 1) nav.push(Markup.button.callback('הבא ➡️', `pg_${qid}_${page + 1}`));
+    if (page < pages - 1) nav.push(Markup.button.callback('➡️', `${pre}_${qid}_${page + 1}`));
+    if (pages >= 4 && page < pages - 2) nav.push(Markup.button.callback('⏭', `${pre}_${qid}_${pages - 1}`));
     rows.push(nav);
   }
-  const line = title
-    ? `${title} (<b>${groups.length}</b>):`
-    : `🔎 נמצאו <b>${groups.length}</b> תוצאות עבור "<b>${esc(q)}</b>":`;
-  await render(ctx, `${header()}\n${line}`, Markup.inlineKeyboard(rows));
+
+  const nMov = e.groups.filter((g) => g.type === 'movie').length;
+  const nSer = e.groups.length - nMov;
+  if (nMov && nSer && e.groups.length > 3) {
+    const mk = (f, label) => Markup.button.callback((e.f === f ? '✅ ' : '') + label, `fl_${qid}_${f}_${mode}`);
+    rows.push([mk('a', `הכל (${e.groups.length})`), mk('m', `🎬 ${nMov}`), mk('s', `📺 ${nSer}`)]);
+  }
+
+  if (mode === 'g' && all.length > size) {
+    let payload = `k_${qid}`;
+    if (!e.title) {
+      const b = Buffer.from(e.q).toString('base64url');
+      if (`q_${b}`.length <= 64) payload = `q_${b}`;
+    }
+    rows.push([Markup.button.url(`📂 כל התוצאות בפרטי (${all.length})`, `https://t.me/${botUsername}?start=${payload}`)]);
+  }
+
+  const total = all.length;
+  const line = e.title
+    ? `${e.title} (<b>${total}</b>)`
+    : `🔎 נמצאו <b>${total}</b> תוצאות עבור "<b>${esc(cut(e.q, 40))}</b>"`;
+  const pg = pages > 1 ? `\n📄 עמוד ${page + 1} מתוך ${pages}` : '';
+  const tail = mode === 'g' ? '\nלחצו על תוצאה לפתיחה בפרטי 👇' : '\nבחרו מהרשימה 👇';
+  return { text: `${header()}\n${line}${pg}${tail}`, kb: Markup.inlineKeyboard(rows) };
+}
+
+async function renderResults(ctx, qid, page, mode = 'p') {
+  const v = resultsView(qid, page, mode);
+  await render(ctx, v.text, v.kb);
 }
 
 async function showSeries(ctx, sid) {
@@ -688,6 +795,49 @@ async function openEpisode(ctx, sid, season, episode) {
 }
 
 // ==========================================
+// הודעת הוראות חיפוש
+// ==========================================
+const helpCool = new Map();
+
+function helpText(isGroup) {
+  return `${header()}\n📖 <b>איך מחפשים נכון?</b>\n\n` +
+    `1️⃣ כתבו רק את <b>שם</b> הסרט או הסדרה\n    <code>הנסיך הקטן</code>\n\n` +
+    `2️⃣ לפרק מסוים הוסיפו עונה ופרק\n    <code>שם הסדרה ע1 פ3</code>  או  <code>S01E03</code>\n\n` +
+    `3️⃣ אין צורך ב"אפשר" / "חפש" / "בבקשה" - פשוט כותבים את השם ✨\n\n` +
+    `4️⃣ לא נמצא? נסו שם קצר יותר, שם באנגלית או כתיב אחר - ואם עדיין אין, אפשר לבקש שנוסיף 📩\n\n` +
+    `5️⃣ הרבה תוצאות? דפדפו עם ⬅️ ➡️ וסננו בין 🎬 סרטים ל-📺 סדרות\n\n` +
+    (isGroup
+      ? `💬 בקבוצה אפשר לכתוב ישירות את שם הסרט, או <code>/search שם הסרט</code>`
+      : `🆕 חדשים: /new  •  🔥 הכי נצפים: /top`);
+}
+
+async function sendHelp(ctx, isGroup) {
+  if (isGroup) {
+    const last = helpCool.get(ctx.chat.id) || 0;
+    if (Date.now() - last < 45000) return;
+    helpCool.set(ctx.chat.id, Date.now());
+    if (helpCool.size > 2000) helpCool.clear();
+    const s = await ctx.reply(helpText(true), {
+      parse_mode: 'HTML', disable_web_page_preview: true,
+      ...Markup.inlineKeyboard([
+        [Markup.button.url('🤖 לחיפוש בפרטי', `https://t.me/${botUsername}?start=help`)],
+        [Markup.button.url('📢 לערוץ שלנו', CHANNEL_URL)]
+      ])
+    }).catch(() => null);
+    if (s) scheduleDelete(ctx.chat.id, s.message_id, 60);
+    if (db.settings.grpSec && ctx.message) scheduleDelete(ctx.chat.id, ctx.message.message_id, db.settings.grpSec);
+    return;
+  }
+  return ctx.reply(helpText(false), {
+    parse_mode: 'HTML', disable_web_page_preview: true,
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('🆕 חדשים', 'cmd_new'), Markup.button.callback('🔥 הכי נצפים', 'cmd_top')],
+      [Markup.button.url('📢 לערוץ שלנו', CHANNEL_URL)]
+    ])
+  });
+}
+
+// ==========================================
 // חובת הצטרפות לערוץ (אופציונלי)
 // ==========================================
 async function subscribed(ctx) {
@@ -695,7 +845,7 @@ async function subscribed(ctx) {
   try {
     const m = await ctx.telegram.getChatMember(CHANNEL_USER, ctx.from.id);
     return !['left', 'kicked'].includes(m.status);
-  } catch (e) { return true; } // אם הבוט לא מנהל בערוץ - לא חוסמים
+  } catch (e) { return true; }
 }
 
 async function needSub(ctx, item) {
@@ -761,7 +911,7 @@ async function sendItem(ctx, item) {
   if (!admin && sent) {
     item.views = (item.views || 0) + 1;
     markDirty(true);
-    await autoClean(ctx, sent); // פעיל רק אם הופעל בהגדרות
+    await autoClean(ctx, sent);
   }
   return sent;
 }
@@ -809,10 +959,29 @@ const adminState = new Map();
 // ==========================================
 // /start
 // ==========================================
+async function runPrivateList(ctx, q) {
+  q = String(q || '').trim();
+  const groups = q.length >= 2 ? searchDB(q) : [];
+  if (!groups.length) return ctx.reply('❌ לא נמצאו תוצאות. נסו לחפש שוב 🔎');
+  const qid = saveQuery(q, groups);
+  return renderResults(ctx, qid, 0, 'p');
+}
+
 bot.start(async (ctx) => {
   const payload = (ctx.message.text.split(' ')[1] || '').trim();
 
   if (payload) {
+    if (payload === 'help') return sendHelp(ctx, false);
+    if (payload.startsWith('q_')) {
+      let q = '';
+      try { q = Buffer.from(payload.slice(2), 'base64url').toString('utf8'); } catch (_) { /* ignore */ }
+      return runPrivateList(ctx, q);
+    }
+    if (payload.startsWith('k_')) {
+      const id = payload.slice(2);
+      if (queries.has(id)) return renderResults(ctx, id, 0, 'p');
+      return ctx.reply('⌛ החיפוש פג תוקף, חפשו שוב 🔎');
+    }
     if (/^(get_|g_)/.test(payload)) {
       const item = findItem(payload.replace(/^(get_|g_)/, ''));
       return item ? sendItem(ctx, item) : ctx.reply('❌ הפריט המבוקש לא נמצא במאגר.');
@@ -835,7 +1004,7 @@ bot.start(async (ctx) => {
       `⚡ <b>העלאה מהירה:</b> העבירו (Forward) לכאן סרטונים, קבצים או קישורים - הבוט יפענח וישמור אוטומטית, ` +
       `ויסכם בהודעה אחת בסוף.\n\n` +
       `🛠 פקודות:\n` +
-      `<code>/last</code> • <code>/new</code> • <code>/top</code>\n` +
+      `<code>/last</code> • <code>/new</code> • <code>/top</code> • <code>/help</code>\n` +
       `<code>/rename שם ישן | שם חדש</code>\n` +
       `<code>/bl add ביטוי</code> • <code>/bl del ביטוי</code> • <code>/bl</code>\n` +
       `<code>/reparse</code> - פענוח מחדש של כל המאגר\n\n` +
@@ -849,24 +1018,29 @@ bot.start(async (ctx) => {
     `${pe('movie')} <b>ברוכים הבאים ל${esc(BRAND)}!</b> ${pe('brand')}\n${HR}\n` +
     `🔍 <b>איך מחפשים?</b>\n• שלחו שם של סרט או סדרה בפרטי.\n` +
     `• לפרק ספציפי: <code>שם הסדרה ע1 פ3</code>\n` +
-    `• חדשים: /new • הכי נצפים: /top\n• בקבוצות: <code>/search שם הסרט</code>${delLine}`,
+    `• חדשים: /new • הכי נצפים: /top • הוראות: /help\n• בקבוצות: <code>/search שם הסרט</code>${delLine}`,
     Markup.inlineKeyboard([[Markup.button.url('📢 לערוץ שלנו', CHANNEL_URL)]])
   );
 });
 
-bot.command('new', async (ctx) => {
+bot.command('help', (ctx) => sendHelp(ctx, ctx.chat.type !== 'private'));
+
+async function showNew(ctx) {
   const groups = latestGroups();
   if (!groups.length) return ctx.reply('המאגר ריק כרגע.');
-  const qid = saveQuery('new', groups, '🆕 <b>התוספות האחרונות</b>');
-  return renderResults(ctx, qid, 0);
-});
-
-bot.command('top', async (ctx) => {
+  const qid = saveQuery('new', groups, NEW_TITLE);
+  return renderResults(ctx, qid, 0, ctx.chat.type === 'private' ? 'p' : 'g');
+}
+async function showTop(ctx) {
   const groups = topGroups();
   if (!groups.length) return ctx.reply('עדיין אין מספיק נתוני צפייה.');
-  const qid = saveQuery('top', groups, '🔥 <b>הכי נצפים</b>');
-  return renderResults(ctx, qid, 0);
-});
+  const qid = saveQuery('top', groups, TOP_TITLE);
+  return renderResults(ctx, qid, 0, ctx.chat.type === 'private' ? 'p' : 'g');
+}
+bot.command('new', showNew);
+bot.command('top', showTop);
+bot.action('cmd_new', async (ctx) => { await ctx.answerCbQuery(); await showNew(ctx); });
+bot.action('cmd_top', async (ctx) => { await ctx.answerCbQuery(); await showTop(ctx); });
 
 // ==========================================
 // פקודות ותפריט מנהל
@@ -1077,12 +1251,25 @@ bot.action(/^bld_([a-f0-9]+)$/, async (ctx) => {
 // ==========================================
 bot.action('noop', (ctx) => ctx.answerCbQuery());
 
-bot.action(/^pg_([a-f0-9]+)_(\d+)$/, async (ctx) => {
-  if (!queries.has(ctx.match[1])) {
+// דפדוף בתוצאות (pg = פרטי, gp = קבוצה)
+bot.action(/^(pg|gp)_([a-f0-9]+)_(\d+)$/, async (ctx) => {
+  const qid = ctx.match[2];
+  if (!ensureQuery(ctx, qid)) {
     return ctx.answerCbQuery('החיפוש פג תוקף, חפשו שוב 🔎', { show_alert: true });
   }
   await ctx.answerCbQuery();
-  await renderResults(ctx, ctx.match[1], parseInt(ctx.match[2], 10));
+  await renderResults(ctx, qid, parseInt(ctx.match[3], 10), ctx.match[1] === 'gp' ? 'g' : 'p');
+});
+
+// סינון סרטים / סדרות
+bot.action(/^fl_([a-f0-9]+)_([ams])_([gp])$/, async (ctx) => {
+  const qid = ctx.match[1];
+  if (!ensureQuery(ctx, qid)) {
+    return ctx.answerCbQuery('החיפוש פג תוקף, חפשו שוב 🔎', { show_alert: true });
+  }
+  queries.get(qid).f = ctx.match[2];
+  await ctx.answerCbQuery();
+  await renderResults(ctx, qid, 0, ctx.match[3]);
 });
 
 bot.action(/^sr_([a-f0-9]+)$/, async (ctx) => { await ctx.answerCbQuery(); await showSeries(ctx, ctx.match[1]); });
@@ -1344,15 +1531,25 @@ async function handleSearch(ctx, text) {
   q = stripBL(q).trim();
 
   if (isGroup && q.length > 60) return;
-  if (q.length < 2) {
-    if (explicit || !isGroup) await ctx.reply('✍️ כתבו שם של סרט או סדרה (לפחות 2 תווים).');
-    return;
-  }
 
   const now = Date.now();
   if (now - (cooldown.get(ctx.from.id) || 0) < 1200) return;
   cooldown.set(ctx.from.id, now);
   if (cooldown.size > 5000) cooldown.clear();
+
+  // ניקוי ניסוחי בקשה ("אפשר את", "יש את", "חפש"...). אם לא נשאר שם - מציגים הוראות
+  const rawQ = q;
+  const a = cleanQuery(q);
+  if (a.empty) {
+    if (!isGroup || explicit || a.trigger) await sendHelp(ctx, isGroup);
+    return;
+  }
+  q = a.q;
+
+  if (q.length < 2) {
+    if (explicit || !isGroup) await ctx.reply('✍️ כתבו שם של סרט או סדרה (לפחות 2 תווים).');
+    return;
+  }
 
   // בקבוצות: הודעת תגובה זמנית ("נמצאו תוצאות") + הודעת המשתמש נמחקות. התוצאות עצמן נשארות.
   const tempNote = async (html) => {
@@ -1364,8 +1561,6 @@ async function handleSearch(ctx, text) {
     }
     return s;
   };
-  // תוצאות בקבוצה - קבועות, לא נמחקות לעולם
-  const groupResults = (html, kb) => ctx.replyWithHTML(html, kb);
 
   // בפרטי: הודעת "מחפש..." שנערכת לתוצאה
   if (!isGroup) {
@@ -1374,21 +1569,38 @@ async function handleSearch(ctx, text) {
   }
 
   const route = async () => {
+    const titleOf = (s, se, has) => (has ? trimSeps(cutAtMarkers(s)) : s);
     const se = extractSE(q);
     const hasSE = se.season !== null || se.episode !== null;
-    const titleQ = hasSE ? trimSeps(cutAtMarkers(q)) : q;
+    const titleQ = titleOf(q, se, hasSE);
+    const searchQ = titleQ.length >= 2 ? titleQ : q;
 
-    const groups = searchDB(titleQ.length >= 2 ? titleQ : q);
+    let groups = searchDB(searchQ);
+
+    // אם הניקוי שינה את הטקסט, בודקים גם את הנוסח המקורי (למקרה ששם הסרט עצמו מתחיל במילת בקשה)
+    if (rawQ !== q) {
+      const rawSE = extractSE(rawQ);
+      const rawHas = rawSE.season !== null || rawSE.episode !== null;
+      const rawTitle = titleOf(rawQ, rawSE, rawHas);
+      if (rawTitle.length >= 2 && rawTitle !== searchQ) {
+        const g2 = searchDB(rawTitle);
+        if (g2.length && (!groups.length || g2[0].score >= 4)) groups = g2;
+      }
+    }
+
     if (!groups.length) {
       if (isGroup) {
-        if (explicit) await tempNote(`❌ לא נמצאו תוצאות עבור <b>"${esc(q)}"</b>.`);
+        if (explicit) await tempNote(`❌ לא נמצאו תוצאות עבור <b>"${esc(cut(q, 40))}"</b>.`);
         return;
       }
       const rid = newReq(q, ctx.from);
       return render(
         ctx,
         `❌ לא נמצאו תוצאות עבור <b>"${esc(q)}"</b>.\nנסו שם קצר יותר או כתיב אחר, או בקשו שנוסיף:`,
-        Markup.inlineKeyboard([[Markup.button.callback('📩 בקשו שנוסיף את זה', `rq_${rid}`)]])
+        Markup.inlineKeyboard([
+          [Markup.button.callback('📩 בקשו שנוסיף את זה', `rq_${rid}`)],
+          [Markup.button.callback('📖 איך מחפשים נכון?', 'cmd_help')]
+        ])
       );
     }
 
@@ -1400,22 +1612,16 @@ async function handleSearch(ctx, text) {
       if (clearWinner) {
         const label = `▶️ ${cut(cand[0].title, 30)} ע${se.season ?? 1}${se.episode != null ? ` פ${se.episode}` : ''}`;
         await tempNote(`🔎 ${who}, מצאתי את מה שחיפשת 👇`);
-        return groupResults(
-          `${header()}\n✨ מצאתי! לחצו לפתיחה בפרטי:`,
-          Markup.inlineKeyboard([[Markup.button.url(
+        return ctx.reply(`${header()}\n✨ מצאתי! לחצו לפתיחה בפרטי:`, {
+          parse_mode: 'HTML', disable_web_page_preview: true,
+          ...Markup.inlineKeyboard([[Markup.button.url(
             label, `https://t.me/${botUsername}?start=e_${cand[0].id}_${se.season ?? 1}_${se.episode ?? 0}`
           )]])
-        );
+        });
       }
-      const rows = groups.slice(0, 5).map((g) => [Markup.button.url(
-        groupLabel(g),
-        `https://t.me/${botUsername}?start=${g.type === 'series' ? 's_' : 'g_'}${g.id}`
-      )]);
-      await tempNote(`🔎 ${who}, נמצאו <b>${groups.length}</b> תוצאות עבור "<b>${esc(cut(q, 40))}</b>" 👇`);
-      return groupResults(
-        `${header()}\nנמצאו <b>${groups.length}</b> תוצאות. לחצו לפתיחה בפרטי:`,
-        Markup.inlineKeyboard(rows)
-      );
+      const qid = saveQuery(searchQ, groups);
+      await tempNote(`🔎 ${who}, נמצאו <b>${groups.length}</b> תוצאות עבור "<b>${esc(cut(searchQ, 40))}</b>" 👇`);
+      return renderResults(ctx, qid, 0, 'g');
     }
 
     if (clearWinner) return openEpisode(ctx, cand[0].id, se.season, se.episode);
@@ -1426,12 +1632,14 @@ async function handleSearch(ctx, text) {
       const item = findItem(g.id);
       return item ? sendItem(ctx, item) : null;
     }
-    const qid = saveQuery(q, groups);
-    return renderResults(ctx, qid, 0);
+    const qid = saveQuery(searchQ, groups);
+    return renderResults(ctx, qid, 0, 'p');
   };
 
   try { await route(); } finally { await dropTarget(ctx); }
 }
+
+bot.action('cmd_help', async (ctx) => { await ctx.answerCbQuery(); await sendHelp(ctx, false); });
 
 // ==========================================
 // מטפל הודעות יחיד
@@ -1499,7 +1707,8 @@ process.on('uncaughtException', (e) => console.error('uncaughtException:', e));
     await bot.telegram.setMyCommands([
       { command: 'search', description: 'חיפוש סרט או סדרה' },
       { command: 'new', description: 'התוספות האחרונות' },
-      { command: 'top', description: 'הכי נצפים' }
+      { command: 'top', description: 'הכי נצפים' },
+      { command: 'help', description: 'איך מחפשים נכון' }
     ]).catch(() => {});
 
     if (!db.items.length) {
